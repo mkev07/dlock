@@ -1,0 +1,35 @@
+name: Dlock
+options:
+  bundleIdPrefix: com.dlock
+  deploymentTarget:
+    macOS: "13.0"
+  xcodeVersion: "15.0"
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    PRODUCT_BUNDLE_IDENTIFIER: com.dlock.app
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.9"
+    MACOSX_DEPLOYMENT_TARGET: "13.0"
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_STYLE: Manual
+    DEVELOPMENT_TEAM: ""
+
+targets:
+  Dlock:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources
+    resources:
+      - path: Resources
+    settings:
+      base:
+        INFOPLIST_FILE: Info.plist
+        PRODUCT_NAME: Dlock
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
+        ENABLE_HARDENED_RUNTIME: NO
+        CODE_SIGN_ENTITLEMENTS: ""
