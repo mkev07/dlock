@@ -30,13 +30,20 @@ class UpdateChecker {
         request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
         request.setValue("Dlock/1.0 (macOS; github.com/mkev07/dlock)", forHTTPHeaderField: "User-Agent")
 
-        URLSession.shared.dataTask(with: request) { data, _, error in
+        URLSession.shared.dataTask(with: request) { data, response, error in
             DispatchQueue.main.async {
                 if let error = error {
                     completion(.failure(error))
                     return
                 }
-                guard let data = data,
+                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                // 404 means no releases have been published yet — not an error
+                if status == 404 {
+                    completion(.failure(URLError(.resourceUnavailable)))
+                    return
+                }
+                guard status == 200,
+                      let data = data,
                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let tag = json["tag_name"] as? String,
                       let htmlURL = json["html_url"] as? String,
@@ -52,6 +59,11 @@ class UpdateChecker {
 
     private func handle(_ result: Result<Release, Error>, silent: Bool) {
         switch result {
+        case .failure(let error as URLError) where error.code == .resourceUnavailable:
+            // No releases published yet — only surface this on manual checks
+            if !silent {
+                alert(title: "You're Up to Date", body: "No releases have been published yet.")
+            }
         case .failure(let error):
             guard !silent else { return }
             alert(title: "Update Check Failed", body: error.localizedDescription)
