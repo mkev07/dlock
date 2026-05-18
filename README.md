@@ -11,8 +11,11 @@ A lightweight macOS menu bar app to pin the Dock to a specific screen. Automatic
 - **Profiles** — Save and switch between named presets (screen + orientation + auto-hide)
 - **Notifications** — Get notified when a screen disconnects or a profile is activated
 - **Reset to Main Display** — Instantly return the Dock to the main display and clear the pinned screen
+- **Menu Bar Icon** — Choose between the default icon or the Dlock app logo
+- **Show in Dock** — Optionally show Dlock in the Dock alongside the menu bar icon
 - **Keyboard Shortcut** — `⌃⌥D` opens the Dlock menu from anywhere
 - **Launch at Login** — Start Dlock automatically on login
+- **Auto Update Check** — Silently checks GitHub for a new release on launch; "Check for Updates..." in the menu always reports the result
 
 ## Requirements
 
