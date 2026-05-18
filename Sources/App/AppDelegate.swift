@@ -5,21 +5,54 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private let screenManager = ScreenManager()
 
+    private static let showInDockKey = "showInDock"
+    private static let useLogoMenuBarIconKey = "useLogoMenuBarIcon"
+
+    private var showInDock: Bool {
+        get { UserDefaults.standard.bool(forKey: Self.showInDockKey) }
+        set { UserDefaults.standard.set(newValue, forKey: Self.showInDockKey) }
+    }
+
+    private var useLogoMenuBarIcon: Bool {
+        get {
+            guard UserDefaults.standard.object(forKey: Self.useLogoMenuBarIconKey) != nil else {
+                return true // default to logo
+            }
+            return UserDefaults.standard.bool(forKey: Self.useLogoMenuBarIconKey)
+        }
+        set { UserDefaults.standard.set(newValue, forKey: Self.useLogoMenuBarIconKey) }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        applyDockVisibility()
         setupStatusItem()
         setupScreenMonitoring()
         HotkeyManager.shared.register()
         rebuildMenu()
     }
 
+    private func applyDockVisibility() {
+        NSApp.setActivationPolicy(showInDock ? .regular : .accessory)
+    }
+
+    private func applyMenuBarIcon() {
+        guard let button = statusItem.button else { return }
+        let image: NSImage?
+        if useLogoMenuBarIcon {
+            image = NSImage(named: "menubar_logo")
+                ?? NSImage(systemSymbolName: "rectangle.bottomhalf.inset.filled", accessibilityDescription: "Dlock")
+        } else {
+            image = NSImage(named: "menubar_icon")
+                ?? NSImage(systemSymbolName: "rectangle.bottomhalf.inset.filled", accessibilityDescription: "Dlock")
+        }
+        image?.isTemplate = true
+        button.image = image
+    }
+
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-
-        if let button = statusItem.button {
-            button.image = NSImage(named: "menubar_icon") ?? NSImage(systemSymbolName: "rectangle.bottomhalf.inset.filled", accessibilityDescription: "Dlock")
-            button.image?.isTemplate = true
-            updateButtonTitle(nil)
-        }
+        applyMenuBarIcon()
+        updateButtonTitle(nil)
 
         HotkeyManager.shared.onHotkeyPressed = { [weak self] in
             guard let button = self?.statusItem.button else { return }
@@ -154,6 +187,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         launchItem.state = LaunchAtLoginManager.shared.isEnabled ? .on : .off
         menu.addItem(launchItem)
 
+        // Menu bar icon style
+        let iconStyleMenu = NSMenu()
+        let iconStyleItem = NSMenuItem(title: "Menu Bar Icon", action: nil, keyEquivalent: "")
+
+        let defaultIconItem = NSMenuItem(title: "Default", action: #selector(selectDefaultMenuBarIcon), keyEquivalent: "")
+        defaultIconItem.target = self
+        defaultIconItem.state = useLogoMenuBarIcon ? .off : .on
+        iconStyleMenu.addItem(defaultIconItem)
+
+        let logoIconItem = NSMenuItem(title: "App Logo", action: #selector(selectLogoMenuBarIcon), keyEquivalent: "")
+        logoIconItem.target = self
+        logoIconItem.state = useLogoMenuBarIcon ? .on : .off
+        iconStyleMenu.addItem(logoIconItem)
+
+        iconStyleItem.submenu = iconStyleMenu
+        menu.addItem(iconStyleItem)
+
+        // Show in Dock
+        let dockItem = NSMenuItem(
+            title: "Show in Dock",
+            action: #selector(toggleShowInDock),
+            keyEquivalent: ""
+        )
+        dockItem.target = self
+        dockItem.state = showInDock ? .on : .off
+        menu.addItem(dockItem)
+
         // About
         let aboutItem = NSMenuItem(
             title: "About Dlock",
@@ -278,6 +338,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleLaunchAtLogin() {
         LaunchAtLoginManager.shared.toggle()
+        rebuildMenu()
+    }
+
+    @objc private func toggleShowInDock() {
+        showInDock = !showInDock
+        applyDockVisibility()
+        rebuildMenu()
+    }
+
+    @objc private func selectDefaultMenuBarIcon() {
+        useLogoMenuBarIcon = false
+        applyMenuBarIcon()
+        rebuildMenu()
+    }
+
+    @objc private func selectLogoMenuBarIcon() {
+        useLogoMenuBarIcon = true
+        applyMenuBarIcon()
         rebuildMenu()
     }
 
