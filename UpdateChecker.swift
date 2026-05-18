@@ -28,6 +28,7 @@ class UpdateChecker {
         var request = URLRequest(url: apiURL)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+        request.setValue("Dlock/1.0 (macOS; github.com/mkev07/dlock)", forHTTPHeaderField: "User-Agent")
 
         URLSession.shared.dataTask(with: request) { data, _, error in
             DispatchQueue.main.async {
