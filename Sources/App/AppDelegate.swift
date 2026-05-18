@@ -29,6 +29,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupScreenMonitoring()
         HotkeyManager.shared.register()
         rebuildMenu()
+        UpdateChecker.shared.checkSilently()
     }
 
     private func applyDockVisibility() {
@@ -214,6 +215,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         dockItem.state = showInDock ? .on : .off
         menu.addItem(dockItem)
 
+        // Check for Updates
+        let updatesItem = NSMenuItem(
+            title: "Check for Updates...",
+            action: #selector(checkForUpdates),
+            keyEquivalent: ""
+        )
+        updatesItem.target = self
+        menu.addItem(updatesItem)
+
         // About
         let aboutItem = NSMenuItem(
             title: "About Dlock",
@@ -363,6 +373,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         screenManager.resetToMainDisplay()
         updateButtonTitle(nil)
         rebuildMenu()
+    }
+
+    @objc private func checkForUpdates() {
+        UpdateChecker.shared.checkAndNotify()
     }
 
     @objc private func showAbout() {
