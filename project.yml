@@ -29,13 +29,15 @@ targets:
       - package: PermissionFlow
         product: PermissionFlow
     sources:
+      - path: Assets.xcassets
+        excludes:
+          - AppIcon.appiconset
+      - path: Resources/Assets.xcassets
       - path: Sources
         excludes:
           - App/Assets.xcassetsContents.json
           - App/Info.plist
       - path: UpdateChecker.swift
-    resources:
-      - path: Resources
     settings:
       base:
         INFOPLIST_FILE: Info.plist

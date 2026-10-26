@@ -26,12 +26,16 @@ A lightweight macOS menu bar app that prevents the Dock from following your poin
 
 ## Building
 
-1. Open the project:
+1. Generate the Xcode project from `project.yml`:
+   ```
+   xcodegen generate
+   ```
+2. Open the project:
    ```
    open Dlock.xcodeproj
    ```
-2. Select the **Dlock** scheme and **Debug** configuration
-3. Press **⌘R** to build and run
+3. Select the **Dlock** scheme and **My Mac** destination
+4. Press **⌘B** to build, or **⌘R** to build and run
 
 > **Accessibility permission** — Dock edge protection and the global keyboard shortcut require Accessibility access. Dlock opens the Accessibility pane with a floating guide that lets you drag Dlock into the permission list. You can reopen the guide from the menu bar under **Grant Accessibility Access**.
 
