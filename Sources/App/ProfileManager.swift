@@ -46,6 +46,7 @@ class ProfileManager {
         let profile = DLockProfile(
             name: name,
             displayID: pinnedID,
+            displayName: UserDefaults.standard.string(forKey: ScreenManager.pinnedScreenNameKey),
             orientation: DockController.shared.getOrientation(),
             autohide: DockController.shared.getAutohide()
         )

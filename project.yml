@@ -6,6 +6,11 @@ options:
   xcodeVersion: "15.0"
   generateEmptyDirectories: true
 
+packages:
+  PermissionFlow:
+    url: https://github.com/jaywcjlove/PermissionFlow.git
+    from: 2.11.4
+
 settings:
   base:
     PRODUCT_BUNDLE_IDENTIFIER: com.dlock.app
@@ -13,16 +18,22 @@ settings:
     CURRENT_PROJECT_VERSION: "1"
     SWIFT_VERSION: "5.9"
     MACOSX_DEPLOYMENT_TARGET: "13.0"
-    CODE_SIGN_IDENTITY: "-"
-    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_STYLE: Automatic
     DEVELOPMENT_TEAM: ""
 
 targets:
   Dlock:
     type: application
     platform: macOS
+    dependencies:
+      - package: PermissionFlow
+        product: PermissionFlow
     sources:
       - path: Sources
+        excludes:
+          - App/Assets.xcassetsContents.json
+          - App/Info.plist
+      - path: UpdateChecker.swift
     resources:
       - path: Resources
     settings:
@@ -31,5 +42,5 @@ targets:
         PRODUCT_NAME: Dlock
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
-        ENABLE_HARDENED_RUNTIME: NO
+        ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_ENTITLEMENTS: ""

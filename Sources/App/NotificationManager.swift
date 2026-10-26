@@ -21,7 +21,11 @@ class NotificationManager {
     }
 
     func screenDisconnected(name: String) {
-        send(title: "Screen Disconnected", body: "\"\(name)\" is no longer connected. Dock returned to main display.")
+        send(title: "Pinned Screen Disconnected", body: "\"\(name)\" is no longer connected. Dlock kept the preference for when it returns.")
+    }
+
+    func screenReconnected(name: String) {
+        send(title: "Pinned Screen Reconnected", body: "Move the Dock to \"\(name)\" once, then Dlock will keep it there.")
     }
 
     func profileActivated(name: String) {

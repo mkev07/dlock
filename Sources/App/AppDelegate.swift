@@ -1,9 +1,14 @@
 import AppKit
+import PermissionFlow
 
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var statusItem: NSStatusItem!
     private let screenManager = ScreenManager()
+    private lazy var permissionFlowController = PermissionFlow.makeController(
+        configuration: PermissionFlowConfiguration(promptForAccessibilityTrust: false)
+    )
 
     private static let showInDockKey = "showInDock"
     private static let useLogoMenuBarIconKey = "useLogoMenuBarIcon"
@@ -27,9 +32,36 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         applyDockVisibility()
         setupStatusItem()
         setupScreenMonitoring()
-        HotkeyManager.shared.register()
         rebuildMenu()
         UpdateChecker.shared.checkSilently()
+        ensureAccessibilityPermission()
+    }
+
+    private func ensureAccessibilityPermission() {
+        if AccessibilityPermission.isGranted() {
+            enableAccessibilityFeatures()
+            return
+        }
+
+        showAccessibilityGuide()
+        AccessibilityPermission.waitForGrant { [weak self] in
+            self?.permissionFlowController.closePanel()
+            self?.enableAccessibilityFeatures()
+        }
+    }
+
+    @MainActor
+    private func showAccessibilityGuide() {
+        permissionFlowController.authorize(
+            pane: .accessibility,
+            suggestedAppURLs: [Bundle.main.bundleURL]
+        )
+    }
+
+    private func enableAccessibilityFeatures() {
+        HotkeyManager.shared.register()
+        DockGuardian.shared.refresh()
+        rebuildMenu()
     }
 
     private func applyDockVisibility() {
@@ -78,6 +110,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.updateButtonTitle(nil)
             NotificationManager.shared.screenDisconnected(name: name)
         }
+        screenManager.onScreenReconnected = { [weak self] screen in
+            NotificationManager.shared.screenReconnected(name: screen.localizedName)
+            self?.rebuildMenu()
+        }
         screenManager.startMonitoring()
     }
 
@@ -86,7 +122,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Current state
         let pinnedName = screenManager.pinnedScreenName ?? "None"
-        let stateLabel = NSMenuItem(title: "Pinned: \(pinnedName)", action: nil, keyEquivalent: "")
+        let stateSuffix: String
+        if screenManager.pinnedScreenName != nil && !screenManager.isPinnedScreenConnected {
+            stateSuffix = " (disconnected)"
+        } else if let pinnedScreen = screenManager.pinnedScreen,
+                  DockGuardian.shared.currentDockScreen()?.displayID != pinnedScreen.displayID {
+            stateSuffix = " — move Dock here once"
+        } else {
+            stateSuffix = ""
+        }
+        let stateLabel = NSMenuItem(title: "Pinned: \(pinnedName)\(stateSuffix)", action: nil, keyEquivalent: "")
         stateLabel.isEnabled = false
         menu.addItem(stateLabel)
 
@@ -111,6 +156,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         screensItem.submenu = screensMenu
         menu.addItem(screensItem)
+
+        let bypassItem = NSMenuItem(
+            title: "Hold ⌥ Option to move the Dock temporarily",
+            action: nil,
+            keyEquivalent: ""
+        )
+        bypassItem.isEnabled = false
+        menu.addItem(bypassItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -215,6 +268,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         dockItem.state = showInDock ? .on : .off
         menu.addItem(dockItem)
 
+        // Accessibility status
+        let axGranted = AccessibilityPermission.isGranted()
+        let axItem = NSMenuItem(
+            title: axGranted ? "Accessibility: Granted" : "Grant Accessibility Access...",
+            action: #selector(openAccessibilitySettings),
+            keyEquivalent: ""
+        )
+        axItem.target = self
+        if axGranted { axItem.state = .on }
+        menu.addItem(axItem)
+
         // Check for Updates
         let updatesItem = NSMenuItem(
             title: "Check for Updates...",
@@ -259,34 +323,56 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Actions
 
     @objc private func pinToScreen(_ sender: NSMenuItem) {
-        guard let displayID = sender.representedObject as? String else { return }
-        screenManager.pinToDisplayID(displayID)
+        guard let displayID = sender.representedObject as? String,
+              let screen = NSScreen.screen(matching: displayID),
+              placeDock(on: screen) else { return }
+        screenManager.pin(to: screen)
         updateButtonTitle(screenManager.pinnedScreenName)
         rebuildMenu()
     }
 
     @objc private func setOrientation(_ sender: NSMenuItem) {
         guard let orient = sender.representedObject as? DockOrientation else { return }
-        if let pinnedID = UserDefaults.standard.string(forKey: ScreenManager.pinnedScreenKey),
-           let screen = NSScreen.screens.first(where: { $0.displayID == pinnedID }) {
-            DockController.shared.moveDockToScreen(screen)
-        }
+        DockGuardian.shared.pause()
         DockController.shared.setOrientation(orient)
         DockController.shared.restartDock()
+        if let pinnedScreen = screenManager.pinnedScreen {
+            _ = placeDock(on: pinnedScreen)
+        }
+        DockGuardian.shared.refresh()
         rebuildMenu()
     }
 
     @objc private func toggleAutohide() {
         let current = DockController.shared.getAutohide()
+        DockGuardian.shared.pause()
         DockController.shared.setAutohide(!current)
         DockController.shared.restartDock()
+        if let pinnedScreen = screenManager.pinnedScreen {
+            _ = placeDock(on: pinnedScreen)
+        }
+        DockGuardian.shared.refresh()
         rebuildMenu()
     }
 
     @objc private func activateProfile(_ sender: NSMenuItem) {
         guard let profileID = sender.representedObject as? UUID,
               let profile = ProfileManager.shared.profiles.first(where: { $0.id == profileID }) else { return }
-        DockController.shared.apply(profile: profile)
+        guard let targetScreen = NSScreen.screen(matching: profile.displayID) else {
+            showAlert(
+                title: "Profile Screen Is Not Connected",
+                message: "Connect \(profile.displayName ?? "the profile's display") and try again."
+            )
+            return
+        }
+
+        DockGuardian.shared.pause()
+        DockController.shared.applySettings(profile: profile)
+        guard placeDock(on: targetScreen) else {
+            DockGuardian.shared.refresh()
+            return
+        }
+        screenManager.activateProfile(profile, on: targetScreen)
         NotificationManager.shared.profileActivated(name: profile.name)
         rebuildMenu()
     }
@@ -370,13 +456,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func resetToMainDisplay() {
-        screenManager.resetToMainDisplay()
+        guard let primaryScreen = NSScreen.screens.first,
+              placeDock(on: primaryScreen) else { return }
+        screenManager.resetPin()
         updateButtonTitle(nil)
         rebuildMenu()
     }
 
     @objc private func checkForUpdates() {
         UpdateChecker.shared.checkAndNotify()
+    }
+
+    @objc private func openAccessibilitySettings() {
+        guard !AccessibilityPermission.isGranted() else { return }
+        showAccessibilityGuide()
+        // If the user grants it after returning, pick it up automatically.
+        AccessibilityPermission.waitForGrant { [weak self] in
+            self?.permissionFlowController.closePanel()
+            self?.enableAccessibilityFeatures()
+        }
     }
 
     @objc private func showAbout() {
@@ -387,14 +485,63 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .applicationVersion: "1.0.0",
             .version: "1.0.0",
             .credits: NSAttributedString(
-                string: "A simple macOS menu bar app to pin the Dock to any screen. Automatically falls back to the main display if the pinned screen is disconnected.\n\nBuilt with Swift and AppKit.",
+                string: "A macOS menu bar app that prevents the Dock from following the pointer away from your preferred screen.\n\nBuilt with Swift and AppKit.",
                 attributes: [.font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)]
             )
         ])
     }
 
     @objc private func quitApp() {
+        DockGuardian.shared.pause()
         HotkeyManager.shared.unregister()
         NSApp.terminate(nil)
+    }
+
+    private func placeDock(on screen: NSScreen) -> Bool {
+        if DockGuardian.shared.currentDockScreen()?.displayID == screen.displayID {
+            return true
+        }
+
+        guard AccessibilityPermission.isGranted() else {
+            showAlert(
+                title: "Accessibility Permission Required",
+                message: "Grant Accessibility access before choosing a pinned display."
+            )
+            AccessibilityPermission.openSettings()
+            return false
+        }
+
+        DockGuardian.shared.pause()
+        let edge = DockController.shared.getOrientation().displayName.lowercased()
+        let alert = NSAlert()
+        alert.messageText = "Move the Dock to \(screen.localizedName)"
+        alert.informativeText = "Move the pointer onto \(screen.localizedName), then push it against the \(edge) edge until the Dock appears there. Click Verify when it is in place."
+        alert.addButton(withTitle: "Verify")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            DockGuardian.shared.refresh()
+            return false
+        }
+
+        guard DockGuardian.shared.currentDockScreen()?.displayID == screen.displayID else {
+            showAlert(
+                title: "Dock Not Detected on \(screen.localizedName)",
+                message: "The Dock did not move. Try again and keep pushing against the \(edge) edge until it appears before clicking Verify."
+            )
+            DockGuardian.shared.refresh()
+            return false
+        }
+        return true
+    }
+
+    private func showAlert(title: String, message: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 }
