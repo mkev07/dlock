@@ -4,25 +4,27 @@ A lightweight macOS menu bar app that prevents the Dock from following your poin
 
 ## Features
 
-- **Pin to Screen** — Keep the Dock on any connected display
+- **Select a Display** — Automatically move the bottom Dock to a connected display, then protect its exposed edge
 - **Prevent Dock Hopping** — Blocks the edge gesture that normally summons the Dock on non-pinned displays
-- **No Cursor Warping** — Nudges the pointer inward by only a few pixels at guarded Dock edges
+- **Stationary Cursor Presentation** — Keeps the cursor visually in place during automatic placement and restores the real pointer afterward; edge protection nudges input inward by a few pixels
 - **Temporary Bypass** — Hold `⌥ Option` when you intentionally want to move the Dock
 - **Reconnect Memory** — Keeps the preferred display UUID when a screen disconnects and resumes protection when it returns
-- **Orientation** — Switch between Bottom, Left, and Right dock positions
-- **Auto-hide** — Toggle Dock auto-hide from the menu
-- **Profiles** — Save and switch between named presets (screen + orientation + auto-hide)
+- **Detached Controls** — A movable window with an animated display map and compact display labels
+- **Auto-hide** — Toggle Dock auto-hide from the controls window
+- **Profiles** — Save and switch between named presets (screen + auto-hide)
 - **Notifications** — Get notified when a screen disconnects or a profile is activated
-- **Reset to Main Display** — Guides you to place the Dock on the primary display, then clears the pin
+- **Reset to Main Display** — Moves the Dock to the primary display, then clears the pin
 - **Menu Bar Icon** — Choose between the default icon or the Dlock app logo
 - **Show in Dock** — Optionally show Dlock in the Dock alongside the menu bar icon
-- **Keyboard Shortcut** — `⌃⌥D` opens the Dlock menu from anywhere
+- **Keyboard Shortcut** — `⌃⌥D` opens the Dlock controls
 - **Launch at Login** — Start Dlock automatically on login
-- **Auto Update Check** — Silently checks GitHub for a new release on launch; "Check for Updates..." in the menu always reports the result
+- **Update Check** — Checks GitHub on launch and opens the release page when a newer version is found; updates are downloaded manually
 
 ## Requirements
 
-- macOS 13.0 (Ventura) or later
+- Deployment target: macOS 13.0 (Ventura) or later. Compatibility across all supported versions is not yet validated.
+- Two connected displays for Dock locking; Accessibility permission is required.
+- Current locally tested builds are Apple Silicon. Intel support has not been validated.
 
 ## Building
 
@@ -37,14 +39,13 @@ A lightweight macOS menu bar app that prevents the Dock from following your poin
 3. Select the **Dlock** scheme and **My Mac** destination
 4. Press **⌘B** to build, or **⌘R** to build and run
 
-> **Accessibility permission** — Dock edge protection and the global keyboard shortcut require Accessibility access. Dlock opens the Accessibility pane with a floating guide that lets you drag Dlock into the permission list. You can reopen the guide from the menu bar under **Grant Accessibility Access**.
+> **Accessibility permission** — Dock edge protection and the global keyboard shortcut require Accessibility access. Dlock opens the Accessibility pane with a floating guide that lets you drag Dlock into the permission list. You can reopen the guide with **Grant Accessibility Access** in the controls window when access is missing.
 
 ## Usage
 
-1. Open **Pin to Screen** and select your preferred display.
-2. If the Dock is currently elsewhere, Dlock pauses protection and asks you to move the pointer to the chosen display's Dock edge once.
-3. Click **Verify** after the Dock appears there.
-4. Dlock then blocks the Dock-triggering edge on every other display.
+1. Click the menu bar icon to open the detached controls window. Select a display in the illustration or the **Displays** list.
+2. Dlock automatically summons the Dock on that display and verifies its location. The cursor stays visually in place while Dlock sends a short synthetic edge gesture, then restores the real pointer. Real mouse input cancels placement safely.
+3. Dlock blocks the Dock-triggering edge on other displays and attempts to restore placement after changing auto-hide or profiles, and when the preferred display reconnects.
 
 Hold `⌥ Option` while moving against another display edge to bypass the lock temporarily.
 
@@ -60,10 +61,26 @@ The prevention approach is inspired by the public-API implementations in [DockPi
 
 ## Distribution
 
-For reliable Accessibility permission and Launch at Login behavior, archive and sign a Release build with a stable Developer ID identity. Rebuilding or moving unsigned development copies can cause macOS to request Accessibility permission again.
+This is a development build, not a sale-ready release. For direct distribution, archive a Release build, sign it with the intended Developer ID Application identity, enable Hardened Runtime and a secure timestamp, notarize it, and staple and verify the ticket. Test the downloaded package on a clean macOS account. Local development signing is not distribution signing.
+
+See [release validation](docs/RELEASE_VALIDATION.md) for the acceptance checklist. Rebuilding or moving development copies can cause macOS to request Accessibility permission again.
 
 ## Keyboard Shortcut
 
 | Shortcut | Action |
 |----------|--------|
-| `⌃⌥D` | Open the Dlock menu |
+| `⌃⌥D` | Open the Dlock controls |
+
+## Current Limits and Pending Fixes
+
+- Automatic display relocation has been validated for the **bottom Dock** in the connected test setup. Position controls are omitted from this build. Change Dock position in macOS System Settings; left/right placement follows native macOS behavior and cannot be assigned freely to every screen.
+- Quit **DockLock Lite** before switching displays with Dlock. Running both caused placement failures; Dlock detects this conflict and displays a message.
+- The current “locked” status reflects an active edge guard, not continuous verification that the Dock is on the selected display. Improving this status is pending.
+- Refreshing protection after external Dock-position changes, keyboard-listener event ownership/recovery, accurate Launch at Login status, update-check failure reporting, and reconnect notification text still need fixes.
+- Sleep/wake, reconnects, permission revocation, and first-run installation must be validated on the final distribution build. Passing the local build or geometry checks does not establish compatibility with every display layout or macOS version.
+
+## Validation
+
+Run the offline checks using [Tests/README.md](Tests/README.md). They cover Dock geometry and exposed-edge placement points; they do not exercise the live pointer guard or prove release readiness.
+
+See [the placement investigation](docs/DOCK-PLACEMENT-INVESTIGATION.md) for implementation evidence and known side-placement limits.

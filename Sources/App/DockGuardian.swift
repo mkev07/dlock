@@ -23,6 +23,8 @@ final class DockGuardian {
     private struct GuardZone {
         let frame: CGRect
         let inwardOffset: CGVector
+        let screenName: String
+        let edgeName: String
     }
 
     private let logger = Logger(subsystem: "com.dlock.app", category: "Guardian")
@@ -32,6 +34,10 @@ final class DockGuardian {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var guardZones: [GuardZone] = []
+    private(set) var interceptedEventCount = 0
+    private var lastIntercept: (date: Date, original: CGPoint, adjusted: CGPoint)?
+    private var tapRecoveryCount = 0
+    private var lastTapRecovery: Date?
 
     private init() {}
 
@@ -45,7 +51,7 @@ final class DockGuardian {
 
         guardZones = buildGuardZones(pinnedID: pinnedID)
         installEventTap()
-        logger.notice("guardian active with \(self.guardZones.count, privacy: .public) guarded edge zones")
+        logger.notice("guardian refreshed with \(self.guardZones.count, privacy: .public) guarded edge zones")
     }
 
     func pause() {
@@ -63,29 +69,114 @@ final class DockGuardian {
               let position = axPosition(of: element),
               let size = axSize(of: element) else { return nil }
 
-        let center = CGPoint(x: position.x + size.width / 2, y: position.y + size.height / 2)
+        guard size.width > 0, size.height > 0 else { return nil }
+        let probe = Self.screenProbePoint(position: position, size: size,
+                                         orientation: DockController.shared.getOrientation())
         return NSScreen.screens.first { screen in
             guard let displayID = screen.directDisplayID else { return false }
-            return CGDisplayBounds(displayID).contains(center)
+            return CGDisplayBounds(displayID).contains(probe)
+        }
+    }
+
+    /// Hidden Dock geometry lies beyond the display edge. Probe one point on
+    /// its inward side, not the center (which may be on a neighbouring screen).
+    static func screenProbePoint(position: CGPoint, size: CGSize,
+                                 orientation: DockOrientation) -> CGPoint {
+        switch orientation {
+        case .bottom:
+            return CGPoint(x: position.x + size.width / 2, y: position.y - 1)
+        case .left:
+            return CGPoint(x: position.x + size.width + 1, y: position.y + size.height / 2)
+        case .right:
+            return CGPoint(x: position.x - 1, y: position.y + size.height / 2)
         }
     }
 
     fileprivate func reenableEventTap() {
-        if let eventTap {
-            CGEvent.tapEnable(tap: eventTap, enable: true)
+        guard let eventTap else { return }
+        CGEvent.tapEnable(tap: eventTap, enable: true)
+        tapRecoveryCount += 1
+        lastTapRecovery = Date()
+        logger.notice("re-enabled event tap after macOS disabled it")
+    }
+
+    var isGuardActive: Bool {
+        guardZones.count > 0
+            && NSScreen.screens.count > 1
+            && UserDefaults.standard.string(forKey: ScreenManager.pinnedScreenKey)
+                .flatMap(NSScreen.screen(matching:)) != nil
+            && eventTap.map { CGEvent.tapIsEnabled(tap: $0) } == true
+            && AccessibilityPermission.isGranted()
+    }
+
+    var guardedEdgeDescriptions: [String] {
+        Array(Set(guardZones.map { "\($0.screenName) · \($0.edgeName)" })).sorted()
+    }
+
+    var statusSummary: String {
+        if !AccessibilityPermission.isGranted() { return "Grant Accessibility permission to enable edge protection." }
+        if NSScreen.screens.count <= 1 { return "Connect a second display to enable edge protection." }
+        guard let pinnedID = UserDefaults.standard.string(forKey: ScreenManager.pinnedScreenKey) else {
+            return "Choose the screen where you want the Dock to stay."
         }
+        guard NSScreen.screen(matching: pinnedID) != nil else {
+            return "The pinned screen is unavailable. Reconnect it or choose another screen."
+        }
+        if guardZones.isEmpty { return "No exposed edges are available to protect in this display layout." }
+        if eventTap.map({ CGEvent.tapIsEnabled(tap: $0) }) != true { return "The pointer monitor is inactive. Quit and reopen Dlock." }
+        return "Protecting the exposed Dock edge on other displays."
+    }
+
+    var diagnosticsText: String {
+        let tapActive = eventTap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false
+        let pinnedID = UserDefaults.standard.string(forKey: ScreenManager.pinnedScreenKey)
+        let pinnedName = pinnedID.flatMap { NSScreen.screen(matching: $0)?.localizedName }
+            ?? UserDefaults.standard.string(forKey: ScreenManager.pinnedScreenNameKey)
+            ?? "None"
+        let eligibility: String
+        let recovery: String
+        if !AccessibilityPermission.isGranted() {
+            eligibility = "INACTIVE — Accessibility permission missing"
+            recovery = "Grant Dlock Accessibility access in System Settings, then quit and reopen Dlock."
+        } else if NSScreen.screens.count <= 1 {
+            eligibility = "INACTIVE — only one display detected"
+            recovery = "Connect a second display to enable Dock locking."
+        } else if pinnedID == nil || NSScreen.screen(matching: pinnedID!) == nil {
+            eligibility = "INACTIVE — pinned display unavailable"
+            recovery = "Reconnect the pinned display or choose another in Dlock’s menu."
+        } else if guardZones.isEmpty {
+            eligibility = "INACTIVE — no exposed edge zones to guard"
+            recovery = "Change the display arrangement or Dock edge, then refresh by reopening Dlock."
+        } else if !tapActive {
+            eligibility = "INACTIVE — event tap is unavailable"
+            recovery = "Quit and reopen Dlock. If this continues, check Accessibility permission."
+        } else {
+            eligibility = "ACTIVE — protecting exposed edges"
+            recovery = tapRecoveryCount == 0
+                ? "No event tap recovery needed."
+                : "Event tap recovered \(tapRecoveryCount) time(s); last at \(lastTapRecovery?.formatted(date: .omitted, time: .standard) ?? "unknown")."
+        }
+        let zones = guardZones.map { "• \($0.screenName): \($0.edgeName) edge" }.joined(separator: "\n")
+        let last = lastIntercept.map {
+            "\($0.date.formatted(date: .omitted, time: .standard)) · (\(Int($0.original.x)), \(Int($0.original.y))) → (\(Int($0.adjusted.x)), \(Int($0.adjusted.y)))"
+        } ?? "None yet"
+        return "Status: \(eligibility)\nPinned display: \(pinnedName)\nGuarded edges (\(guardZones.count)): \(zones.isEmpty ? "None" : "\n\(zones)")\nIntercepted pointer events: \(interceptedEventCount)\nLast adjusted event: \(last)\n\n\(recovery)\n\nThe counter records pointer events Dlock moved inward. It does not count Dock appearances; macOS does not expose that signal to Dlock."
     }
 
     fileprivate func filterMouseEvent(_ event: CGEvent) {
+        guard event.getIntegerValueField(.eventSourceUserData) != DockPlacementSession.eventMarker else { return }
         let flags = event.flags.union(CGEventSource.flagsState(.combinedSessionState))
         guard !flags.contains(.maskAlternate) else { return }
 
         let location = event.location
         guard let zone = guardZones.first(where: { $0.frame.contains(location) }) else { return }
-        event.location = CGPoint(
+        let adjusted = CGPoint(
             x: location.x + zone.inwardOffset.dx,
             y: location.y + zone.inwardOffset.dy
         )
+        event.location = adjusted
+        interceptedEventCount += 1
+        lastIntercept = (Date(), location, adjusted)
     }
 
     private func installEventTap() {
@@ -146,7 +237,8 @@ final class DockGuardian {
                 zones.append(zone(
                     for: item.frame,
                     exposedRange: exposedRange,
-                    orientation: orientation
+                    orientation: orientation,
+                    screenName: item.screen.localizedName
                 ))
             }
         }
@@ -207,7 +299,8 @@ final class DockGuardian {
     private func zone(
         for frame: CGRect,
         exposedRange: ClosedRange<CGFloat>,
-        orientation: DockOrientation
+        orientation: DockOrientation,
+        screenName: String
     ) -> GuardZone {
         switch orientation {
         case .left:
@@ -218,7 +311,9 @@ final class DockGuardian {
                     width: edgeDepth,
                     height: exposedRange.upperBound - exposedRange.lowerBound
                 ),
-                inwardOffset: CGVector(dx: edgeDepth, dy: 0)
+                inwardOffset: CGVector(dx: edgeDepth, dy: 0),
+                screenName: screenName,
+                edgeName: "Left"
             )
         case .right:
             return GuardZone(
@@ -228,7 +323,9 @@ final class DockGuardian {
                     width: edgeDepth,
                     height: exposedRange.upperBound - exposedRange.lowerBound
                 ),
-                inwardOffset: CGVector(dx: -edgeDepth, dy: 0)
+                inwardOffset: CGVector(dx: -edgeDepth, dy: 0),
+                screenName: screenName,
+                edgeName: "Right"
             )
         case .bottom:
             return GuardZone(
@@ -238,7 +335,9 @@ final class DockGuardian {
                     width: exposedRange.upperBound - exposedRange.lowerBound,
                     height: edgeDepth
                 ),
-                inwardOffset: CGVector(dx: 0, dy: -edgeDepth)
+                inwardOffset: CGVector(dx: 0, dy: -edgeDepth),
+                screenName: screenName,
+                edgeName: "Bottom"
             )
         }
     }

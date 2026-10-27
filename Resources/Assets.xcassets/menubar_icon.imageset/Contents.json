@@ -1,10 +1,12 @@
 {
   "images" : [
     {
+      "filename" : "icon_22x22.png",
       "idiom" : "mac",
       "scale" : "1x"
     },
     {
+      "filename" : "icon_22x22@2x.png",
       "idiom" : "mac",
       "scale" : "2x"
     }

@@ -1,14 +1,16 @@
 import AppKit
-import PermissionFlow
+import SwiftUI
 
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var statusItem: NSStatusItem!
+    private var diagnosticsWindow: NSWindow?
     private let screenManager = ScreenManager()
-    private lazy var permissionFlowController = PermissionFlow.makeController(
-        configuration: PermissionFlowConfiguration(promptForAccessibilityTrust: false)
-    )
+    private var controlsWindow: NSWindow!
+    private let panelModel = DlockPanelModel()
+    private var isPlacingDock = false
+    private let accessGuide = AccessGuideController()
 
     private static let showInDockKey = "showInDock"
     private static let useLogoMenuBarIconKey = "useLogoMenuBarIcon"
@@ -44,24 +46,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         showAccessibilityGuide()
-        AccessibilityPermission.waitForGrant { [weak self] in
-            self?.permissionFlowController.closePanel()
-            self?.enableAccessibilityFeatures()
-        }
     }
 
-    @MainActor
     private func showAccessibilityGuide() {
-        permissionFlowController.authorize(
-            pane: .accessibility,
-            suggestedAppURLs: [Bundle.main.bundleURL]
-        )
+        controlsWindow?.orderOut(nil)
+        accessGuide.show()
+        AccessibilityPermission.waitForGrant { [weak self] in
+            self?.accessGuide.markGranted()
+            self?.enableAccessibilityFeatures()
+        }
     }
 
     private func enableAccessibilityFeatures() {
         HotkeyManager.shared.register()
         DockGuardian.shared.refresh()
-        rebuildMenu()
+        Task {
+            _ = await restorePinnedDock()
+            rebuildMenu()
+        }
     }
 
     private func applyDockVisibility() {
@@ -85,279 +87,310 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         applyMenuBarIcon()
-        updateButtonTitle(nil)
+
+        let hostingController = NSHostingController(rootView: DlockPanelView(model: panelModel))
+        hostingController.sizingOptions = [.preferredContentSize]
+        let window = NSWindow(contentViewController: hostingController)
+        window.title = "Dlock"
+        window.styleMask = [.titled, .closable, .fullSizeContentView]
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.isMovableByWindowBackground = true
+        window.isReleasedWhenClosed = false
+        window.level = .floating
+        window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        window.setContentSize(NSSize(width: DlockPanelView.width, height: hostingController.view.fittingSize.height))
+        window.center()
+        controlsWindow = window
+        if let button = statusItem.button {
+            button.target = self
+            button.action = #selector(toggleControlsWindow)
+            button.setAccessibilityLabel("Dlock Dock controls")
+        }
+
+        panelModel.onAction = { [weak self] action in
+            self?.handle(action)
+        }
 
         HotkeyManager.shared.onHotkeyPressed = { [weak self] in
-            guard let button = self?.statusItem.button else { return }
-            self?.statusItem.menu?.popUp(positioning: nil, at: NSPoint(x: 0, y: self!.buttonHeight()), in: button)
+            self?.showControlsWindow()
         }
     }
 
-    private func buttonHeight() -> CGFloat {
-        return statusItem.button?.frame.height ?? 22
+    @objc private func toggleControlsWindow() {
+        if controlsWindow.isVisible {
+            controlsWindow.orderOut(nil)
+        } else {
+            showControlsWindow()
+        }
     }
 
-    private func updateButtonTitle(_ screenName: String?) {
-        guard let button = statusItem.button else { return }
-        button.title = ""
+    private func showControlsWindow() {
+        rebuildMenu()
+        NSApp.activate(ignoringOtherApps: true)
+        controlsWindow.makeKeyAndOrderFront(nil)
+    }
+
+    private func handle(_ action: DlockPanelModel.Action) {
+        switch action {
+        case .selectDisplay(let displayID): Task { await pinToDisplay(displayID) }
+        case .setLocked(let locked): Task { await setLocked(locked) }
+        case .setAutohide(let enabled): Task { await applyAutohide(enabled) }
+        case .grantAccess: openAccessibilitySettings()
+        case .showProfilesMenu: showProfilesMenu()
+        case .showSettingsMenu: showSettingsMenu()
+        case .quit: quitApp()
+        }
+    }
+
+    // MARK: - Panel menus
+
+    private func showProfilesMenu() {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let profiles = panelModel.state.profiles
+        if profiles.isEmpty {
+            menu.addItem(ActionMenuItem("No Saved Profiles", isEnabled: false) {})
+        }
+        for profile in profiles {
+            let item = ActionMenuItem(profile.name, isChecked: profile.isActive) { [weak self] in
+                Task { await self?.activateProfile(id: profile.id) }
+            }
+            item.toolTip = profile.detail
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        menu.addItem(ActionMenuItem("Save Current Setup…", isEnabled: panelModel.state.isLocked) { [weak self] in
+            self?.promptToSaveProfile()
+        })
+        if !profiles.isEmpty {
+            let delete = NSMenuItem(title: "Delete", action: nil, keyEquivalent: "")
+            let submenu = NSMenu()
+            for profile in profiles {
+                submenu.addItem(ActionMenuItem(profile.name) { [weak self] in
+                    self?.deleteProfile(id: profile.id)
+                })
+            }
+            delete.submenu = submenu
+            menu.addItem(delete)
+        }
+        popUpAtPointer(menu)
+    }
+
+    private func showSettingsMenu() {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.addItem(ActionMenuItem("Launch at Login", isChecked: LaunchAtLoginManager.shared.isEnabled) { [weak self] in
+            self?.toggleLaunchAtLogin()
+        })
+        menu.addItem(ActionMenuItem("Show Dlock in Dock", isChecked: showInDock) { [weak self] in
+            self?.toggleShowInDock()
+        })
+        let icon = NSMenuItem(title: "Menu Bar Icon", action: nil, keyEquivalent: "")
+        let iconMenu = NSMenu()
+        iconMenu.addItem(ActionMenuItem("Dlock Logo", isChecked: useLogoMenuBarIcon) { [weak self] in
+            self?.selectLogoMenuBarIcon()
+        })
+        iconMenu.addItem(ActionMenuItem("Dock Symbol", isChecked: !useLogoMenuBarIcon) { [weak self] in
+            self?.selectDefaultMenuBarIcon()
+        })
+        icon.submenu = iconMenu
+        menu.addItem(icon)
+        menu.addItem(.separator())
+        menu.addItem(ActionMenuItem("Move Dock to Main Display", isEnabled: AccessibilityPermission.isGranted()) { [weak self] in
+            Task { await self?.resetToMainDisplay() }
+        })
+        menu.addItem(ActionMenuItem("Live Diagnostics…") { [weak self] in self?.showDiagnostics() })
+        menu.addItem(ActionMenuItem("Check for Updates…") { [weak self] in self?.checkForUpdates() })
+        menu.addItem(ActionMenuItem("About Dlock") { [weak self] in self?.showAbout() })
+        menu.addItem(.separator())
+        menu.addItem(ActionMenuItem("Hold ⌥ to let the Dock move · ⌃⌥D opens Dlock", isEnabled: false) {})
+        popUpAtPointer(menu)
+    }
+
+    private func popUpAtPointer(_ menu: NSMenu) {
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
 
     private func setupScreenMonitoring() {
         screenManager.onScreenParametersChanged = { [weak self] in
             self?.rebuildMenu()
         }
-        screenManager.onScreenDisconnected = { [weak self] name in
-            self?.updateButtonTitle(nil)
+        screenManager.onScreenDisconnected = { name in
             NotificationManager.shared.screenDisconnected(name: name)
         }
         screenManager.onScreenReconnected = { [weak self] screen in
             NotificationManager.shared.screenReconnected(name: screen.localizedName)
-            self?.rebuildMenu()
+            Task {
+                _ = await self?.restorePinnedDock()
+                self?.rebuildMenu()
+            }
         }
         screenManager.startMonitoring()
     }
 
     private func rebuildMenu() {
-        let menu = NSMenu()
-
-        // Current state
-        let pinnedName = screenManager.pinnedScreenName ?? "None"
-        let stateSuffix: String
-        if screenManager.pinnedScreenName != nil && !screenManager.isPinnedScreenConnected {
-            stateSuffix = " (disconnected)"
-        } else if let pinnedScreen = screenManager.pinnedScreen,
-                  DockGuardian.shared.currentDockScreen()?.displayID != pinnedScreen.displayID {
-            stateSuffix = " — move Dock here once"
-        } else {
-            stateSuffix = ""
-        }
-        let stateLabel = NSMenuItem(title: "Pinned: \(pinnedName)\(stateSuffix)", action: nil, keyEquivalent: "")
-        stateLabel.isEnabled = false
-        menu.addItem(stateLabel)
-
-        menu.addItem(NSMenuItem.separator())
-
-        // Screens submenu
-        let screensMenu = NSMenu()
-        let screensItem = NSMenuItem(title: "Pin to Screen", action: nil, keyEquivalent: "")
+        statusItem.menu = nil
+        let screens = NSScreen.screens
         let pinnedID = UserDefaults.standard.string(forKey: ScreenManager.pinnedScreenKey)
+        let pinnedScreen = pinnedID.flatMap(NSScreen.screen(matching:))
+        let isGranted = AccessibilityPermission.isGranted()
+        let orientation = DockController.shared.getOrientation()
+        let autohide = DockController.shared.readAutohide()
 
-        for screen in NSScreen.screens {
-            let displayID = screen.displayID
-            let item = NSMenuItem(
-                title: screen.localizedName,
-                action: #selector(pinToScreen(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = displayID
-            item.state = (displayID == pinnedID) ? .on : .off
-            screensMenu.addItem(item)
+        let status: DlockPanelModel.LockStatus
+        let title: String
+        if !isGranted {
+            status = .needsAccess
+            title = "Accessibility access needed"
+        } else if DockGuardian.shared.isGuardActive {
+            status = .locked
+            title = "Locked to \(pinnedScreen?.localizedName ?? "your display")"
+        } else if pinnedID == nil {
+            status = .unlocked
+            title = "Dock not locked"
+        } else if screens.count <= 1 {
+            status = .singleDisplay
+            title = "Single display"
+        } else {
+            status = .attention
+            title = pinnedScreen == nil ? "Locked display disconnected" : "Lock needs attention"
         }
-        screensItem.submenu = screensMenu
-        menu.addItem(screensItem)
+        let detail = isGranted
+            ? DockGuardian.shared.statusSummary
+            : "Dlock needs it to stop the Dock from following your pointer."
 
-        let bypassItem = NSMenuItem(
-            title: "Hold ⌥ Option to move the Dock temporarily",
-            action: nil,
-            keyEquivalent: ""
-        )
-        bypassItem.isEnabled = false
-        menu.addItem(bypassItem)
-
-        menu.addItem(NSMenuItem.separator())
-
-        // Orientation
-        let orientMenu = NSMenu()
-        let orientItem = NSMenuItem(title: "Orientation", action: nil, keyEquivalent: "")
-        for orient in DockOrientation.allCases {
-            let item = NSMenuItem(
-                title: orient.displayName,
-                action: #selector(setOrientation(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = orient
-            item.state = DockController.shared.getOrientation() == orient ? .on : .off
-            orientMenu.addItem(item)
-        }
-        orientItem.submenu = orientMenu
-        menu.addItem(orientItem)
-
-        // Auto-hide
-        let autoItem = NSMenuItem(
-            title: "Auto-hide Dock",
-            action: #selector(toggleAutohide),
-            keyEquivalent: ""
-        )
-        autoItem.target = self
-        autoItem.state = DockController.shared.getAutohide() ? .on : .off
-        menu.addItem(autoItem)
-
-        menu.addItem(NSMenuItem.separator())
-
-        // Profiles submenu
-        let profilesMenu = NSMenu()
-        let profilesItem = NSMenuItem(title: "Profiles", action: nil, keyEquivalent: "")
-        let profiles = ProfileManager.shared.profiles
-        for profile in profiles {
-            let item = NSMenuItem(
-                title: profile.name,
-                action: #selector(activateProfile(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = profile.id
-            profilesMenu.addItem(item)
+        let profiles = ProfileManager.shared.profiles.map { profile in
+            let screenName = NSScreen.screen(matching: profile.displayID)?.localizedName
+                ?? profile.displayName ?? "Disconnected display"
+            let detail = [screenName, profile.autohide ? "Auto-hide" : nil]
+                .compactMap { $0 }
+                .joined(separator: " · ")
+            let isActive = pinnedScreen.map { NSScreen.screen(matching: profile.displayID) == $0 } == true
+                && profile.autohide == (autohide ?? false)
+            return DlockPanelModel.Profile(id: profile.id, name: profile.name, detail: detail, isActive: isActive)
         }
 
-        if !profiles.isEmpty {
-            profilesMenu.addItem(NSMenuItem.separator())
-        }
-
-        let saveItem = NSMenuItem(title: "Save Current as Profile...", action: #selector(saveProfile), keyEquivalent: "")
-        saveItem.target = self
-        profilesMenu.addItem(saveItem)
-
-        if !profiles.isEmpty {
-            profilesMenu.addItem(NSMenuItem.separator())
-            let deleteItem = NSMenuItem(title: "Delete Profile...", action: #selector(deleteProfile), keyEquivalent: "")
-            deleteItem.target = self
-            profilesMenu.addItem(deleteItem)
-        }
-
-        profilesItem.submenu = profilesMenu
-        menu.addItem(profilesItem)
-
-        menu.addItem(NSMenuItem.separator())
-
-        // Launch at login
-        let launchItem = NSMenuItem(
-            title: "Launch at Login",
-            action: #selector(toggleLaunchAtLogin),
-            keyEquivalent: ""
+        panelModel.state = .init(
+            displays: screens.enumerated().map { index, screen in
+                .init(
+                    id: screen.displayID,
+                    name: screen.localizedName,
+                    frame: screen.frame,
+                    isMain: index == 0,
+                    isBuiltIn: screen.directDisplayID.map { CGDisplayIsBuiltin($0) != 0 } ?? false
+                )
+            },
+            pinnedDisplayID: pinnedScreen?.displayID ?? pinnedID,
+            dockDisplayID: isGranted ? DockGuardian.shared.currentDockScreen()?.displayID : nil,
+            orientation: orientation,
+            autohideEnabled: autohide,
+            status: status,
+            statusTitle: title,
+            statusDetail: detail,
+            profiles: profiles
         )
-        launchItem.target = self
-        launchItem.state = LaunchAtLoginManager.shared.isEnabled ? .on : .off
-        menu.addItem(launchItem)
-
-        // Menu bar icon style
-        let iconStyleMenu = NSMenu()
-        let iconStyleItem = NSMenuItem(title: "Menu Bar Icon", action: nil, keyEquivalent: "")
-
-        let defaultIconItem = NSMenuItem(title: "Default", action: #selector(selectDefaultMenuBarIcon), keyEquivalent: "")
-        defaultIconItem.target = self
-        defaultIconItem.state = useLogoMenuBarIcon ? .off : .on
-        iconStyleMenu.addItem(defaultIconItem)
-
-        let logoIconItem = NSMenuItem(title: "App Logo", action: #selector(selectLogoMenuBarIcon), keyEquivalent: "")
-        logoIconItem.target = self
-        logoIconItem.state = useLogoMenuBarIcon ? .on : .off
-        iconStyleMenu.addItem(logoIconItem)
-
-        iconStyleItem.submenu = iconStyleMenu
-        menu.addItem(iconStyleItem)
-
-        // Show in Dock
-        let dockItem = NSMenuItem(
-            title: "Show in Dock",
-            action: #selector(toggleShowInDock),
-            keyEquivalent: ""
-        )
-        dockItem.target = self
-        dockItem.state = showInDock ? .on : .off
-        menu.addItem(dockItem)
-
-        // Accessibility status
-        let axGranted = AccessibilityPermission.isGranted()
-        let axItem = NSMenuItem(
-            title: axGranted ? "Accessibility: Granted" : "Grant Accessibility Access...",
-            action: #selector(openAccessibilitySettings),
-            keyEquivalent: ""
-        )
-        axItem.target = self
-        if axGranted { axItem.state = .on }
-        menu.addItem(axItem)
-
-        // Check for Updates
-        let updatesItem = NSMenuItem(
-            title: "Check for Updates...",
-            action: #selector(checkForUpdates),
-            keyEquivalent: ""
-        )
-        updatesItem.target = self
-        menu.addItem(updatesItem)
-
-        // About
-        let aboutItem = NSMenuItem(
-            title: "About Dlock",
-            action: #selector(showAbout),
-            keyEquivalent: ""
-        )
-        aboutItem.target = self
-        menu.addItem(aboutItem)
-
-        // Reset
-        let resetItem = NSMenuItem(
-            title: "Reset to Main Display",
-            action: #selector(resetToMainDisplay),
-            keyEquivalent: ""
-        )
-        resetItem.target = self
-        menu.addItem(resetItem)
-
-        menu.addItem(NSMenuItem.separator())
-
-        // Quit
-        let quitItem = NSMenuItem(
-            title: "Quit Dlock",
-            action: #selector(quitApp),
-            keyEquivalent: "q"
-        )
-        quitItem.target = self
-        menu.addItem(quitItem)
-
-        statusItem.menu = menu
     }
 
     // MARK: - Actions
 
-    @objc private func pinToScreen(_ sender: NSMenuItem) {
-        guard let displayID = sender.representedObject as? String,
-              let screen = NSScreen.screen(matching: displayID),
-              placeDock(on: screen) else { return }
+    @objc private func showDiagnostics() {
+        let window: NSWindow
+        if let existing = diagnosticsWindow {
+            window = existing
+        } else {
+            let text = NSTextField(wrappingLabelWithString: "")
+            text.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+            text.maximumNumberOfLines = 0
+            text.translatesAutoresizingMaskIntoConstraints = false
+            let content = NSView()
+            content.addSubview(text)
+            NSLayoutConstraint.activate([
+                text.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
+                text.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
+                text.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
+                text.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20)
+            ])
+            window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 260), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+            window.title = "Dlock Live Diagnostics"
+            window.contentView = content
+            window.center()
+            diagnosticsWindow = window
+            Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak text, weak window] _ in
+                guard let text, window?.isVisible == true else { return }
+                text.stringValue = DockGuardian.shared.diagnosticsText
+            }
+        }
+        if let text = window.contentView?.subviews.first as? NSTextField {
+            text.stringValue = DockGuardian.shared.diagnosticsText
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    private func setLocked(_ locked: Bool) async {
+        guard !isPlacingDock else { return }
+        if locked {
+            guard let screen = DockGuardian.shared.currentDockScreen() ?? NSScreen.screens.first else { return }
+            await pinToDisplay(screen.displayID)
+        } else {
+            screenManager.resetPin()
+            panelModel.flash("Dock unlocked. It follows the pointer again.")
+            rebuildMenu()
+        }
+    }
+
+    private func promptToSaveProfile() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Save Profile"
+        alert.informativeText = "Saves the locked display and auto-hide setting."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
+        textField.placeholderString = "Profile name"
+        alert.accessoryView = textField
+        alert.window.initialFirstResponder = textField
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        saveProfile(named: name)
+    }
+
+    private func pinToDisplay(_ displayID: String) async {
+        guard !isPlacingDock else { return }
+        guard let screen = NSScreen.screen(matching: displayID), await placeDock(on: screen) else {
+            rebuildMenu()
+            return
+        }
         screenManager.pin(to: screen)
-        updateButtonTitle(screenManager.pinnedScreenName)
+        panelModel.flash("Dock locked to \(screen.localizedName).")
         rebuildMenu()
     }
 
-    @objc private func setOrientation(_ sender: NSMenuItem) {
-        guard let orient = sender.representedObject as? DockOrientation else { return }
+    private func applyAutohide(_ enabled: Bool) async {
+        guard !isPlacingDock else { return }
         DockGuardian.shared.pause()
-        DockController.shared.setOrientation(orient)
-        DockController.shared.restartDock()
-        if let pinnedScreen = screenManager.pinnedScreen {
-            _ = placeDock(on: pinnedScreen)
-        }
+        let result = DockController.shared.changeAutohide(to: enabled)
+        let restored = await restorePinnedDock()
         DockGuardian.shared.refresh()
+        guard restored else { rebuildMenu(); return }
+
+        let state = enabled ? "On" : "Off"
+        switch result {
+        case .applied:
+            panelModel.flash("Auto-hide is now \(state).")
+        case .savedWithoutRestart:
+            panelModel.flash("Auto-hide is saved as \(state), but the Dock did not restart. Reopen Dlock to refresh it.", isError: true)
+        case .notSaved:
+            panelModel.flash("macOS did not save Auto-hide \(state). Try again.", isError: true)
+        }
         rebuildMenu()
     }
 
-    @objc private func toggleAutohide() {
-        let current = DockController.shared.getAutohide()
-        DockGuardian.shared.pause()
-        DockController.shared.setAutohide(!current)
-        DockController.shared.restartDock()
-        if let pinnedScreen = screenManager.pinnedScreen {
-            _ = placeDock(on: pinnedScreen)
-        }
-        DockGuardian.shared.refresh()
-        rebuildMenu()
-    }
-
-    @objc private func activateProfile(_ sender: NSMenuItem) {
-        guard let profileID = sender.representedObject as? UUID,
-              let profile = ProfileManager.shared.profiles.first(where: { $0.id == profileID }) else { return }
+    private func activateProfile(id profileID: UUID) async {
+        guard !isPlacingDock else { return }
+        guard let profile = ProfileManager.shared.profiles.first(where: { $0.id == profileID }) else { return }
         guard let targetScreen = NSScreen.screen(matching: profile.displayID) else {
             showAlert(
                 title: "Profile Screen Is Not Connected",
@@ -367,69 +400,38 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         DockGuardian.shared.pause()
-        DockController.shared.applySettings(profile: profile)
-        guard placeDock(on: targetScreen) else {
+        // Position is managed by macOS for this build, including old profiles.
+        guard DockController.shared.changeAutohide(to: profile.autohide) == .applied else {
+            panelModel.flash("Could not apply Auto-hide from \(profile.name).", isError: true)
+            DockGuardian.shared.refresh()
+            rebuildMenu()
+            return
+        }
+        guard await placeDock(on: targetScreen) else {
             DockGuardian.shared.refresh()
             return
         }
         screenManager.activateProfile(profile, on: targetScreen)
         NotificationManager.shared.profileActivated(name: profile.name)
+        panelModel.flash("Applied \(profile.name).")
         rebuildMenu()
     }
 
-    @objc private func saveProfile() {
-        guard screenManager.pinnedScreenName != nil else {
-            let alert = NSAlert()
-            alert.messageText = "No Screen Pinned"
-            alert.informativeText = "Pin a screen first before saving a profile."
-            alert.runModal()
+
+    private func saveProfile(named name: String) {
+        guard ProfileManager.shared.saveCurrentAsProfile(name: name) != nil else {
+            panelModel.flash("Lock the Dock to a display before saving a profile.", isError: true)
             return
         }
-
-        let alert = NSAlert()
-        alert.messageText = "Save Profile"
-        alert.informativeText = "Enter a name for this profile:"
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
-
-        let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
-        textField.placeholderString = "Profile name"
-        alert.accessoryView = textField
-
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            let name = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !name.isEmpty {
-                _ = ProfileManager.shared.saveCurrentAsProfile(name: name)
-                rebuildMenu()
-            }
-        }
+        panelModel.flash("Saved profile \(name).")
+        rebuildMenu()
     }
 
-    @objc private func deleteProfile() {
-        let profiles = ProfileManager.shared.profiles
-        guard !profiles.isEmpty else { return }
-
-        let alert = NSAlert()
-        alert.messageText = "Delete Profile"
-        alert.informativeText = "Select a profile to delete:"
-        alert.addButton(withTitle: "Delete")
-        alert.addButton(withTitle: "Cancel")
-
-        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
-        for profile in profiles {
-            popup.addItem(withTitle: profile.name)
-            popup.lastItem?.representedObject = profile.id
-        }
-        alert.accessoryView = popup
-
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            if let selectedID = popup.selectedItem?.representedObject as? UUID {
-                ProfileManager.shared.deleteProfile(id: selectedID)
-                rebuildMenu()
-            }
-        }
+    private func deleteProfile(id: UUID) {
+        guard let profile = ProfileManager.shared.profiles.first(where: { $0.id == id }) else { return }
+        ProfileManager.shared.deleteProfile(id: id)
+        panelModel.flash("Deleted \(profile.name).")
+        rebuildMenu()
     }
 
     @objc private func toggleLaunchAtLogin() {
@@ -455,11 +457,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
     }
 
-    @objc private func resetToMainDisplay() {
+    @objc private func resetToMainDisplay() async {
+        guard !isPlacingDock else { return }
         guard let primaryScreen = NSScreen.screens.first,
-              placeDock(on: primaryScreen) else { return }
+              await placeDock(on: primaryScreen) else { return }
         screenManager.resetPin()
-        updateButtonTitle(nil)
+        panelModel.flash("Dock unlocked and back on \(primaryScreen.localizedName).")
         rebuildMenu()
     }
 
@@ -470,11 +473,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func openAccessibilitySettings() {
         guard !AccessibilityPermission.isGranted() else { return }
         showAccessibilityGuide()
-        // If the user grants it after returning, pick it up automatically.
-        AccessibilityPermission.waitForGrant { [weak self] in
-            self?.permissionFlowController.closePanel()
-            self?.enableAccessibilityFeatures()
-        }
     }
 
     @objc private func showAbout() {
@@ -497,43 +495,36 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.terminate(nil)
     }
 
-    private func placeDock(on screen: NSScreen) -> Bool {
-        if DockGuardian.shared.currentDockScreen()?.displayID == screen.displayID {
-            return true
-        }
+    private func restorePinnedDock() async -> Bool {
+        guard let screen = screenManager.pinnedScreen else { return true }
+        return await placeDock(on: screen)
+    }
 
+    private func placeDock(on screen: NSScreen) async -> Bool {
+        guard !isPlacingDock else { return false }
+        if DockGuardian.shared.currentDockScreen()?.displayID == screen.displayID { return true }
+        // Both apps install input guards around Dock edges. A competing guard
+        // can intercept our placement gesture before it reaches the Dock.
+        if let competingApp = NSRunningApplication.runningApplications(
+            withBundleIdentifier: "pro.docklock.lite").first {
+            panelModel.flash("Quit \(competingApp.localizedName ?? "DockLock Lite") before moving the Dock with Dlock.", isError: true)
+            return false
+        }
         guard AccessibilityPermission.isGranted() else {
-            showAlert(
-                title: "Accessibility Permission Required",
-                message: "Grant Accessibility access before choosing a pinned display."
-            )
-            AccessibilityPermission.openSettings()
+            showAccessibilityGuide()
             return false
         }
-
+        isPlacingDock = true
         DockGuardian.shared.pause()
-        let edge = DockController.shared.getOrientation().displayName.lowercased()
-        let alert = NSAlert()
-        alert.messageText = "Move the Dock to \(screen.localizedName)"
-        alert.informativeText = "Move the pointer onto \(screen.localizedName), then push it against the \(edge) edge until the Dock appears there. Click Verify when it is in place."
-        alert.addButton(withTitle: "Verify")
-        alert.addButton(withTitle: "Cancel")
-        NSApp.activate(ignoringOtherApps: true)
-
-        guard alert.runModal() == .alertFirstButtonReturn else {
+        defer {
+            isPlacingDock = false
             DockGuardian.shared.refresh()
-            return false
         }
-
-        guard DockGuardian.shared.currentDockScreen()?.displayID == screen.displayID else {
-            showAlert(
-                title: "Dock Not Detected on \(screen.localizedName)",
-                message: "The Dock did not move. Try again and keep pushing against the \(edge) edge until it appears before clicking Verify."
-            )
-            DockGuardian.shared.refresh()
-            return false
+        let moved = await DockController.shared.moveDock(to: screen)
+        if !moved {
+            panelModel.flash("macOS could not move the Dock to \(screen.localizedName). Check the display arrangement and try again.", isError: true)
         }
-        return true
+        return moved
     }
 
     private func showAlert(title: String, message: String) {
@@ -543,5 +534,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         alert.informativeText = message
         alert.addButton(withTitle: "OK")
         alert.runModal()
+    }
+}
+
+/// NSMenuItem that runs a closure, for menus built on the fly.
+private final class ActionMenuItem: NSMenuItem {
+    private let handler: () -> Void
+
+    init(_ title: String, isChecked: Bool = false, isEnabled: Bool = true, handler: @escaping () -> Void) {
+        self.handler = handler
+        super.init(title: title, action: #selector(run), keyEquivalent: "")
+        target = self
+        state = isChecked ? .on : .off
+        self.isEnabled = isEnabled
+    }
+
+    required init(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    @objc private func run() {
+        handler()
     }
 }

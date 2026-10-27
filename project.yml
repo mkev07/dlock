@@ -6,11 +6,6 @@ options:
   xcodeVersion: "15.0"
   generateEmptyDirectories: true
 
-packages:
-  PermissionFlow:
-    url: https://github.com/jaywcjlove/PermissionFlow.git
-    from: 2.11.4
-
 settings:
   base:
     PRODUCT_BUNDLE_IDENTIFIER: com.dlock.app
@@ -25,13 +20,7 @@ targets:
   Dlock:
     type: application
     platform: macOS
-    dependencies:
-      - package: PermissionFlow
-        product: PermissionFlow
     sources:
-      - path: Assets.xcassets
-        excludes:
-          - AppIcon.appiconset
       - path: Resources/Assets.xcassets
       - path: Sources
         excludes:
