@@ -13,6 +13,10 @@ import AppKit
             ("hidden right", CGPoint(x: 3976, y: 0), CGSize(width: 50, height: 600), .right)
         ]
         var failures = 0
+        DockGuardian.shared.isProtectionEnabled = false
+        DockGuardian.shared.refresh()
+        if !DockGuardian.shared.isGuardActive { print("PASS: unlicensed guardian cannot install an event tap") }
+        else { failures += 1 }
         for (name, position, size, orientation) in cases {
             let point = DockGuardian.screenProbePoint(position: position, size: size, orientation: orientation)
             if display.contains(point) { print("PASS: \(name)") }

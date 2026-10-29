@@ -19,3 +19,9 @@ Packages/
 
 # Misc
 *.orig
+Backend/node_modules/
+Backend/data/
+Backend/.env*
+
+# Website maintained in mkev07/product-landing
+Website/

@@ -1,0 +1,8 @@
+{
+  "name": "dlock-licensing-test-service",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.13" },
+  "scripts": { "start": "node server.mjs", "test": "node --test" },
+  "dependencies": { "standardwebhooks": "1.1.1" }
+}

@@ -6,6 +6,7 @@ import SwiftUI
 /// and compact rows for the rest.
 struct DlockPanelView: View {
     @ObservedObject var model: DlockPanelModel
+    @ObservedObject private var updater = UpdateChecker.shared
 
     static let width: CGFloat = 300
 
@@ -15,7 +16,10 @@ struct DlockPanelView: View {
         VStack(spacing: 0) {
             header
 
-            if !state.isAccessibilityGranted {
+            if !state.isLicensed {
+                MenuRow(title: "Activate License…", showsChevron: true) { model.send(.showLicense) }
+                    .padding(.bottom, 4)
+            } else if !state.isAccessibilityGranted {
                 AccessRow { model.send(.grantAccess) }
                     .padding(.bottom, 4)
             }
@@ -34,6 +38,7 @@ struct DlockPanelView: View {
                     DisplayRow(
                         display: display,
                         isPinned: display.id == state.pinnedDisplayID,
+                        isVerified: state.status == .locked,
                         hasDock: display.id == state.dockDisplayID
                     ) {
                         model.send(.selectDisplay(display.id))
@@ -41,19 +46,27 @@ struct DlockPanelView: View {
                     .animation(.easeInOut(duration: 0.2), value: state)
                 }
             }
-            .disabled(!state.isAccessibilityGranted)
-            .opacity(state.isAccessibilityGranted ? 1 : 0.45)
+            .disabled(!state.canUseDockFeatures)
+            .opacity(state.canUseDockFeatures ? 1 : 0.45)
 
             PanelDivider()
+            PositionRow(orientation: state.orientation) {
+                model.send(.setOrientation($0))
+            }
+            .disabled(!state.canUseDockFeatures)
             AutohideRow(isOn: state.autohideEnabled) { model.send(.setAutohide($0)) }
+                .disabled(!state.canUseDockFeatures)
 
             PanelDivider()
             MenuRow(title: "Profiles", value: state.profiles.first(where: \.isActive)?.name, showsChevron: true) {
                 model.send(.showProfilesMenu)
             }
+            .disabled(!state.canUseDockFeatures)
             MenuRow(title: "Settings", showsChevron: true) {
                 model.send(.showSettingsMenu)
             }
+            PanelDivider()
+            UpdateStatusRow(updater: updater)
             PanelDivider()
             MenuRow(title: "Quit Dlock", shortcut: "⌘Q") {
                 model.send(.quit)
@@ -104,7 +117,7 @@ struct DlockPanelView: View {
             ))
             .labelsHidden()
             .toggleStyle(.switch)
-            .disabled(!state.isAccessibilityGranted || state.displays.isEmpty)
+            .disabled(!state.canUseDockFeatures || state.displays.isEmpty)
         }
         .padding(.horizontal, 9)
         .padding(.top, 4)
@@ -112,6 +125,7 @@ struct DlockPanelView: View {
     }
 
     private var subtitle: String {
+        if !state.isLicensed { return "Activate your license to enable Dlock" }
         switch state.status {
         case .needsAccess: return "Waiting for Accessibility access"
         case .locked: return "The Dock stays on\n\(state.pinnedDisplayName ?? "your display")"
@@ -205,11 +219,12 @@ private struct AccessRow: View {
 private struct DisplayRow: View {
     let display: DlockPanelModel.Display
     let isPinned: Bool
+    let isVerified: Bool
     let hasDock: Bool
     let action: () -> Void
 
     private var detail: String? {
-        if isPinned { return "Dock locked here" }
+        if isPinned { return isVerified ? "Dock locked here" : "Selected display" }
         if hasDock { return "Dock is here" }
         return nil
     }
@@ -231,7 +246,7 @@ private struct DisplayRow: View {
                 }
                 Spacer(minLength: 4)
                 if isPinned {
-                    Image(systemName: "lock.fill")
+                    Image(systemName: isVerified ? "lock.fill" : "exclamationmark.circle")
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                 }
@@ -242,9 +257,76 @@ private struct DisplayRow: View {
             .modifier(RowHighlight())
         }
         .buttonStyle(.plain)
-        .help(isPinned ? "The Dock is locked to \(display.name)" : "Lock the Dock to \(display.name)")
+        .help(isPinned ? (isVerified ? "The Dock is locked to \(display.name)" : "Selected for Dock Lock: \(display.name)") : "Lock the Dock to \(display.name)")
         .accessibilityLabel(display.name + (detail.map { ", \($0)" } ?? ""))
         .accessibilityAddTraits(isPinned ? .isSelected : [])
+    }
+}
+
+private struct UpdateStatusRow: View {
+    @ObservedObject var updater: UpdateChecker
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 8) {
+            if updater.state == .checking {
+                ProgressView().controlSize(.small)
+                    .accessibilityLabel("Checking for updates")
+            } else {
+                Image(systemName: "arrow.down.circle")
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(updater.state.title).font(.system(size: 11, weight: .medium))
+                Text(updater.state.detail)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Button(updater.state.actionTitle) { updater.performAction() }
+                .controlSize(.small)
+                .disabled(updater.state == .checking)
+                .accessibilityLabel("\(updater.state.actionTitle): \(updater.state.title)")
+        }
+        .padding(9)
+        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 7))
+        .padding(.horizontal, 4)
+    }
+}
+
+private struct PositionRow: View {
+    let orientation: DockOrientation
+    let onChange: (DockOrientation) -> Void
+
+    var body: some View {
+        HStack {
+            Text("Position")
+                .font(.system(size: 13))
+            Spacer()
+            HStack(spacing: 6) {
+                ForEach([DockOrientation.left, .bottom, .right], id: \.self) { position in
+                    Button { onChange(position) } label: {
+                        CircleGlyph(symbol: symbol(for: position), isSelected: orientation == position, size: 26)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Dock position \(position.displayName)")
+                    .accessibilityValue(orientation == position ? "Selected" : "Not selected")
+                    .accessibilityAddTraits(orientation == position ? [.isSelected] : [])
+                    .help("Move Dock to \(position.displayName)")
+                }
+            }
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 4)
+    }
+
+    private func symbol(for position: DockOrientation) -> String {
+        switch position {
+        case .left: return "rectangle.leftthird.inset.filled"
+        case .bottom: return "rectangle.bottomthird.inset.filled"
+        case .right: return "rectangle.rightthird.inset.filled"
+        }
     }
 }
 
@@ -323,7 +405,7 @@ private struct DisplayMap: View {
     var body: some View {
         let bounds = state.displays.reduce(CGRect.null) { $0.union($1.frame) }
         let scale = min(maxSize.width / bounds.width, maxSize.height / bounds.height)
-        let dockID = state.pinnedDisplayID ?? state.dockDisplayID
+        let dockID = state.dockDisplayID
 
         ZStack(alignment: .topLeading) {
             ForEach(state.displays) { display in

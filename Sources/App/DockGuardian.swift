@@ -34,24 +34,39 @@ final class DockGuardian {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var guardZones: [GuardZone] = []
-    private(set) var interceptedEventCount = 0
-    private var lastIntercept: (date: Date, original: CGPoint, adjusted: CGPoint)?
-    private var tapRecoveryCount = 0
-    private var lastTapRecovery: Date?
+    private var observedOrientation: DockOrientation?
 
     private init() {}
 
+    var isProtectionEnabled = false {
+        didSet { if !isProtectionEnabled { stop() } }
+    }
+
     func refresh() {
         stop()
+        guard isProtectionEnabled else { return }
+        let orientation = DockController.shared.getOrientation()
+        observedOrientation = orientation
 
         guard AccessibilityPermission.isGranted(),
               NSScreen.screens.count > 1,
               let pinnedID = UserDefaults.standard.string(forKey: ScreenManager.pinnedScreenKey),
               NSScreen.screen(matching: pinnedID) != nil else { return }
 
-        guardZones = buildGuardZones(pinnedID: pinnedID)
+        guardZones = buildGuardZones(pinnedID: pinnedID, orientation: orientation)
         installEventTap()
         logger.notice("guardian refreshed with \(self.guardZones.count, privacy: .public) guarded edge zones")
+    }
+
+    /// Called outside placement, even while controls are closed. Synchronizing
+    /// the Dock preference domain detects changes made by System Settings.
+    /// A transient unreadable value must not reset protection to Bottom.
+    @discardableResult
+    func refreshIfOrientationChanged() -> Bool {
+        guard let orientation = DockController.shared.readOrientation(),
+              orientation != observedOrientation else { return false }
+        refresh()
+        return true
     }
 
     func pause() {
@@ -95,8 +110,6 @@ final class DockGuardian {
     fileprivate func reenableEventTap() {
         guard let eventTap else { return }
         CGEvent.tapEnable(tap: eventTap, enable: true)
-        tapRecoveryCount += 1
-        lastTapRecovery = Date()
         logger.notice("re-enabled event tap after macOS disabled it")
     }
 
@@ -127,41 +140,6 @@ final class DockGuardian {
         return "Protecting the exposed Dock edge on other displays."
     }
 
-    var diagnosticsText: String {
-        let tapActive = eventTap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false
-        let pinnedID = UserDefaults.standard.string(forKey: ScreenManager.pinnedScreenKey)
-        let pinnedName = pinnedID.flatMap { NSScreen.screen(matching: $0)?.localizedName }
-            ?? UserDefaults.standard.string(forKey: ScreenManager.pinnedScreenNameKey)
-            ?? "None"
-        let eligibility: String
-        let recovery: String
-        if !AccessibilityPermission.isGranted() {
-            eligibility = "INACTIVE — Accessibility permission missing"
-            recovery = "Grant Dlock Accessibility access in System Settings, then quit and reopen Dlock."
-        } else if NSScreen.screens.count <= 1 {
-            eligibility = "INACTIVE — only one display detected"
-            recovery = "Connect a second display to enable Dock locking."
-        } else if pinnedID == nil || NSScreen.screen(matching: pinnedID!) == nil {
-            eligibility = "INACTIVE — pinned display unavailable"
-            recovery = "Reconnect the pinned display or choose another in Dlock’s menu."
-        } else if guardZones.isEmpty {
-            eligibility = "INACTIVE — no exposed edge zones to guard"
-            recovery = "Change the display arrangement or Dock edge, then refresh by reopening Dlock."
-        } else if !tapActive {
-            eligibility = "INACTIVE — event tap is unavailable"
-            recovery = "Quit and reopen Dlock. If this continues, check Accessibility permission."
-        } else {
-            eligibility = "ACTIVE — protecting exposed edges"
-            recovery = tapRecoveryCount == 0
-                ? "No event tap recovery needed."
-                : "Event tap recovered \(tapRecoveryCount) time(s); last at \(lastTapRecovery?.formatted(date: .omitted, time: .standard) ?? "unknown")."
-        }
-        let zones = guardZones.map { "• \($0.screenName): \($0.edgeName) edge" }.joined(separator: "\n")
-        let last = lastIntercept.map {
-            "\($0.date.formatted(date: .omitted, time: .standard)) · (\(Int($0.original.x)), \(Int($0.original.y))) → (\(Int($0.adjusted.x)), \(Int($0.adjusted.y)))"
-        } ?? "None yet"
-        return "Status: \(eligibility)\nPinned display: \(pinnedName)\nGuarded edges (\(guardZones.count)): \(zones.isEmpty ? "None" : "\n\(zones)")\nIntercepted pointer events: \(interceptedEventCount)\nLast adjusted event: \(last)\n\n\(recovery)\n\nThe counter records pointer events Dlock moved inward. It does not count Dock appearances; macOS does not expose that signal to Dlock."
-    }
 
     fileprivate func filterMouseEvent(_ event: CGEvent) {
         guard event.getIntegerValueField(.eventSourceUserData) != DockPlacementSession.eventMarker else { return }
@@ -175,8 +153,6 @@ final class DockGuardian {
             y: location.y + zone.inwardOffset.dy
         )
         event.location = adjusted
-        interceptedEventCount += 1
-        lastIntercept = (Date(), location, adjusted)
     }
 
     private func installEventTap() {
@@ -212,13 +188,12 @@ final class DockGuardian {
         guardZones = []
     }
 
-    private func buildGuardZones(pinnedID: String) -> [GuardZone] {
+    private func buildGuardZones(pinnedID: String, orientation: DockOrientation) -> [GuardZone] {
         let screens = NSScreen.screens
         let frames = screens.compactMap { screen -> (screen: NSScreen, frame: CGRect)? in
             guard let displayID = screen.directDisplayID else { return nil }
             return (screen, CGDisplayBounds(displayID))
         }
-        let orientation = DockController.shared.getOrientation()
         var zones: [GuardZone] = []
 
         for item in frames where item.screen.displayID != pinnedID {

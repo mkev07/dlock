@@ -1,15 +1,19 @@
 import AppKit
 import SwiftUI
+import ServiceManagement
 
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var statusItem: NSStatusItem!
-    private var diagnosticsWindow: NSWindow?
+    private var licenseWindow: NSWindow?
+    private let licenseManager = LicenseManager()
     private let screenManager = ScreenManager()
     private var controlsWindow: NSWindow!
     private let panelModel = DlockPanelModel()
     private var isPlacingDock = false
+    private var statusRefreshTimer: Timer?
+    private var licenseRefreshTimer: Timer?
     private let accessGuide = AccessGuideController()
 
     private static let showInDockKey = "showInDock"
@@ -31,15 +35,86 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        setupEditingMenu()
         applyDockVisibility()
         setupStatusItem()
+        licenseManager.onAccessChange = { [weak self] unlocked in self?.applyLicenseAccess(unlocked) }
+        licenseManager.load()
+        UpdateChecker.shared.onStateChange = { [weak self] in
+            self?.resizeControlsToFit()
+        }
         setupScreenMonitoring()
+        licenseRefreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in await self?.licenseManager.refreshIfNeeded() }
+        }
+        licenseRefreshTimer?.tolerance = 5
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(refreshLicense),
+            name: NSWorkspace.didWakeNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(refreshLicense),
+            name: NSApplication.didBecomeActiveNotification, object: nil)
         rebuildMenu()
         UpdateChecker.shared.checkSilently()
-        ensureAccessibilityPermission()
+        if licenseManager.hasActivation {
+            Task {
+                await licenseManager.refreshIfNeeded()
+                if !licenseManager.isUnlocked {
+                    showControlsWindow()
+                    showLicense()
+                }
+            }
+        } else {
+            showControlsWindow()
+            showLicense()
+        }
+    }
+
+    @objc private func refreshLicense(_ notification: Notification) {
+        Task { await licenseManager.refreshIfNeeded() }
+    }
+
+    private func setupEditingMenu() {
+        let mainMenu = NSApp.mainMenu ?? NSMenu()
+        if mainMenu.items.isEmpty {
+            let appItem = NSMenuItem(title: "Dlock", action: nil, keyEquivalent: "")
+            let appMenu = NSMenu(title: "Dlock")
+            let about = NSMenuItem(title: "About Dlock", action: #selector(showAbout), keyEquivalent: "")
+            about.target = self
+            appMenu.addItem(about)
+            appMenu.addItem(.separator())
+            let quit = NSMenuItem(title: "Quit Dlock", action: #selector(quitApp), keyEquivalent: "q")
+            quit.target = self
+            appMenu.addItem(quit)
+            appItem.submenu = appMenu
+            mainMenu.addItem(appItem)
+        }
+        let item = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+        let edit = NSMenu(title: "Edit")
+        for (title, action, key) in [
+            ("Cut", #selector(NSText.cut(_:)), "x"),
+            ("Copy", #selector(NSText.copy(_:)), "c"),
+            ("Paste", #selector(NSText.paste(_:)), "v"),
+            ("Select All", #selector(NSText.selectAll(_:)), "a")
+        ] {
+            edit.addItem(NSMenuItem(title: title, action: action, keyEquivalent: key))
+        }
+        item.submenu = edit
+        mainMenu.addItem(item)
+        NSApp.mainMenu = mainMenu
+    }
+
+    private func applyLicenseAccess(_ unlocked: Bool) {
+        DockGuardian.shared.isProtectionEnabled = unlocked
+        if unlocked {
+            ensureAccessibilityPermission()
+        } else {
+            DockGuardian.shared.pause()
+            HotkeyManager.shared.unregister()
+        }
+        rebuildMenu()
     }
 
     private func ensureAccessibilityPermission() {
+        guard licenseManager.isUnlocked else { return }
         if AccessibilityPermission.isGranted() {
             enableAccessibilityFeatures()
             return
@@ -58,10 +133,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func enableAccessibilityFeatures() {
+        guard licenseManager.isUnlocked else { return }
         HotkeyManager.shared.register()
         DockGuardian.shared.refresh()
         Task {
-            _ = await restorePinnedDock()
+            if UserDefaults.standard.string(forKey: ScreenManager.pinnedScreenKey) == nil {
+                await setLocked(true)
+            } else {
+                _ = await restorePinnedDock()
+            }
             rebuildMenu()
         }
     }
@@ -102,6 +182,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.setContentSize(NSSize(width: DlockPanelView.width, height: hostingController.view.fittingSize.height))
         window.center()
         controlsWindow = window
+        // Poll preferences even with the controls closed. During placement,
+        // the guardian must remain paused; its final refresh uses the newest
+        // orientation. AX location checks only run while controls are visible.
+        statusRefreshTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self, !self.isPlacingDock else { return }
+            DockGuardian.shared.refreshIfOrientationChanged()
+            if self.controlsWindow.isVisible { self.rebuildMenu() }
+        }
+        statusRefreshTimer?.tolerance = 0.1
         if let button = statusItem.button {
             button.target = self
             button.action = #selector(toggleControlsWindow)
@@ -133,9 +222,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func handle(_ action: DlockPanelModel.Action) {
         switch action {
+        case .selectDisplay, .setLocked, .setAutohide, .setOrientation, .grantAccess, .showProfilesMenu:
+            guard licenseManager.isUnlocked else { showLicense(); return }
+        default: break
+        }
+        switch action {
+        case .showLicense: showLicense()
         case .selectDisplay(let displayID): Task { await pinToDisplay(displayID) }
         case .setLocked(let locked): Task { await setLocked(locked) }
         case .setAutohide(let enabled): Task { await applyAutohide(enabled) }
+        case .setOrientation(let orientation): Task { await applyOrientation(orientation) }
         case .grantAccess: openAccessibilitySettings()
         case .showProfilesMenu: showProfilesMenu()
         case .showSettingsMenu: showSettingsMenu()
@@ -146,6 +242,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Panel menus
 
     private func showProfilesMenu() {
+        guard licenseManager.isUnlocked else { return }
         let menu = NSMenu()
         menu.autoenablesItems = false
         let profiles = panelModel.state.profiles
@@ -180,9 +277,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func showSettingsMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
-        menu.addItem(ActionMenuItem("Launch at Login", isChecked: LaunchAtLoginManager.shared.isEnabled) { [weak self] in
+        menu.addItem(ActionMenuItem("License…") { [weak self] in self?.showLicense() })
+        menu.addItem(.separator())
+        let loginManager = LaunchAtLoginManager.shared
+        let loginTitle = loginManager.requiresApproval ? "Launch at Login (Approval Required)" : "Launch at Login"
+        menu.addItem(ActionMenuItem(loginTitle, isChecked: loginManager.isEnabled, isEnabled: licenseManager.isUnlocked) { [weak self] in
             self?.toggleLaunchAtLogin()
         })
+        if loginManager.requiresApproval {
+            menu.addItem(ActionMenuItem("Open Login Items Settings…") {
+                SMAppService.openSystemSettingsLoginItems()
+            })
+        }
         menu.addItem(ActionMenuItem("Show Dlock in Dock", isChecked: showInDock) { [weak self] in
             self?.toggleShowInDock()
         })
@@ -197,14 +303,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         icon.submenu = iconMenu
         menu.addItem(icon)
         menu.addItem(.separator())
-        menu.addItem(ActionMenuItem("Move Dock to Main Display", isEnabled: AccessibilityPermission.isGranted()) { [weak self] in
+        menu.addItem(ActionMenuItem("Move Dock to Main Display", isEnabled: licenseManager.isUnlocked && AccessibilityPermission.isGranted()) { [weak self] in
             Task { await self?.resetToMainDisplay() }
         })
-        menu.addItem(ActionMenuItem("Live Diagnostics…") { [weak self] in self?.showDiagnostics() })
-        menu.addItem(ActionMenuItem("Check for Updates…") { [weak self] in self?.checkForUpdates() })
+        menu.addItem(ActionMenuItem("Check for Updates…", isEnabled: UpdateChecker.shared.state != .checking) { [weak self] in self?.checkForUpdates() })
         menu.addItem(ActionMenuItem("About Dlock") { [weak self] in self?.showAbout() })
         menu.addItem(.separator())
-        menu.addItem(ActionMenuItem("Hold ⌥ to let the Dock move · ⌃⌥D opens Dlock", isEnabled: false) {})
+        menu.addItem(ActionMenuItem("Hold ⌥ to let the Dock move · ⌘⌃⌥D opens Dlock", isEnabled: false) {})
         popUpAtPointer(menu)
     }
 
@@ -216,14 +321,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         screenManager.onScreenParametersChanged = { [weak self] in
             self?.rebuildMenu()
         }
-        screenManager.onScreenDisconnected = { name in
+        screenManager.onScreenDisconnected = { [weak self] name in
+            guard self?.licenseManager.isUnlocked == true else { return }
             NotificationManager.shared.screenDisconnected(name: name)
         }
         screenManager.onScreenReconnected = { [weak self] screen in
-            NotificationManager.shared.screenReconnected(name: screen.localizedName)
-            Task {
-                _ = await self?.restorePinnedDock()
-                self?.rebuildMenu()
+            Task { [weak self] in
+                guard let self, self.licenseManager.isUnlocked else { return }
+                _ = await self.restorePinnedDock()
+                guard self.screenManager.pinnedScreen?.displayID == screen.displayID else { return }
+                let restored = DockGuardian.shared.currentDockScreen()?.displayID == screen.displayID
+                NotificationManager.shared.screenReconnected(name: screen.localizedName, restored: restored)
+                self.rebuildMenu()
             }
         }
         screenManager.startMonitoring()
@@ -238,27 +347,43 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let orientation = DockController.shared.getOrientation()
         let autohide = DockController.shared.readAutohide()
 
-        let status: DlockPanelModel.LockStatus
+        let dockScreen = isGranted ? DockGuardian.shared.currentDockScreen() : nil
+        let status = DlockPanelModel.resolveLockStatus(
+            hasAccess: isGranted,
+            pinnedDisplayID: licenseManager.isUnlocked ? (pinnedScreen?.displayID ?? pinnedID) : nil,
+            dockDisplayID: dockScreen?.displayID,
+            connectedDisplayIDs: screens.map(\.displayID),
+            guardActive: DockGuardian.shared.isGuardActive)
         let title: String
-        if !isGranted {
-            status = .needsAccess
+        let detail: String
+        switch status {
+        case .needsAccess:
             title = "Accessibility access needed"
-        } else if DockGuardian.shared.isGuardActive {
-            status = .locked
+            detail = "Dlock needs it to stop the Dock from following your pointer."
+        case .locked:
             title = "Locked to \(pinnedScreen?.localizedName ?? "your display")"
-        } else if pinnedID == nil {
-            status = .unlocked
+            detail = "Dock location confirmed. Protecting its edge on other displays."
+        case .unlocked:
             title = "Dock not locked"
-        } else if screens.count <= 1 {
-            status = .singleDisplay
+            detail = "The Dock follows the pointer."
+        case .singleDisplay:
             title = "Single display"
-        } else {
-            status = .attention
-            title = pinnedScreen == nil ? "Locked display disconnected" : "Lock needs attention"
+            detail = "Connect another display to use Dock Lock."
+        case .attention:
+            if pinnedScreen == nil {
+                title = "Selected display disconnected"
+                detail = "Selected display disconnected\nReconnect it or choose another"
+            } else if !DockGuardian.shared.isGuardActive {
+                title = "Dock protection is inactive"
+                detail = "Dock protection is inactive\nReopen Dlock or contact support"
+            } else if dockScreen == nil {
+                title = "Can’t verify Dock location"
+                detail = "Can’t verify Dock location\nSelect your display to retry"
+            } else {
+                title = "Dock is on another screen"
+                detail = "Dock is on another screen\nSelect your display to retry"
+            }
         }
-        let detail = isGranted
-            ? DockGuardian.shared.statusSummary
-            : "Dlock needs it to stop the Dock from following your pointer."
 
         let profiles = ProfileManager.shared.profiles.map { profile in
             let screenName = NSScreen.screen(matching: profile.displayID)?.localizedName
@@ -271,7 +396,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return DlockPanelModel.Profile(id: profile.id, name: profile.name, detail: detail, isActive: isActive)
         }
 
-        panelModel.state = .init(
+        let nextState = DlockPanelModel.State(
+            isLicensed: licenseManager.isUnlocked,
             displays: screens.enumerated().map { index, screen in
                 .init(
                     id: screen.displayID,
@@ -281,8 +407,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     isBuiltIn: screen.directDisplayID.map { CGDisplayIsBuiltin($0) != 0 } ?? false
                 )
             },
-            pinnedDisplayID: pinnedScreen?.displayID ?? pinnedID,
-            dockDisplayID: isGranted ? DockGuardian.shared.currentDockScreen()?.displayID : nil,
+            pinnedDisplayID: licenseManager.isUnlocked ? (pinnedScreen?.displayID ?? pinnedID) : nil,
+            dockDisplayID: dockScreen?.displayID,
             orientation: orientation,
             autohideEnabled: autohide,
             status: status,
@@ -290,45 +416,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             statusDetail: detail,
             profiles: profiles
         )
+        if panelModel.state != nextState {
+            let orientationChanged = panelModel.state.orientation != nextState.orientation
+            panelModel.state = nextState
+            if orientationChanged {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, let content = self.controlsWindow.contentView else { return }
+                    content.layoutSubtreeIfNeeded()
+                    self.controlsWindow.setContentSize(NSSize(width: DlockPanelView.width, height: content.fittingSize.height))
+                }
+            }
+        }
     }
 
     // MARK: - Actions
 
-    @objc private func showDiagnostics() {
-        let window: NSWindow
-        if let existing = diagnosticsWindow {
-            window = existing
-        } else {
-            let text = NSTextField(wrappingLabelWithString: "")
-            text.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
-            text.maximumNumberOfLines = 0
-            text.translatesAutoresizingMaskIntoConstraints = false
-            let content = NSView()
-            content.addSubview(text)
-            NSLayoutConstraint.activate([
-                text.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
-                text.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
-                text.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
-                text.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20)
-            ])
-            window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 260), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
-            window.title = "Dlock Live Diagnostics"
-            window.contentView = content
-            window.center()
-            diagnosticsWindow = window
-            Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak text, weak window] _ in
-                guard let text, window?.isVisible == true else { return }
-                text.stringValue = DockGuardian.shared.diagnosticsText
-            }
-        }
-        if let text = window.contentView?.subviews.first as? NSTextField {
-            text.stringValue = DockGuardian.shared.diagnosticsText
-        }
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
-    }
-
     private func setLocked(_ locked: Bool) async {
+        guard licenseManager.isUnlocked else { return }
         guard !isPlacingDock else { return }
         if locked {
             guard let screen = DockGuardian.shared.currentDockScreen() ?? NSScreen.screens.first else { return }
@@ -341,6 +445,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func promptToSaveProfile() {
+        guard licenseManager.isUnlocked else { return }
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = "Save Profile"
@@ -358,17 +463,59 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func pinToDisplay(_ displayID: String) async {
+        guard licenseManager.isUnlocked else { return }
         guard !isPlacingDock else { return }
         guard let screen = NSScreen.screen(matching: displayID), await placeDock(on: screen) else {
             rebuildMenu()
             return
         }
+        guard licenseManager.isUnlocked else { return }
         screenManager.pin(to: screen)
         panelModel.flash("Dock locked to \(screen.localizedName).")
         rebuildMenu()
     }
 
+    private func applyOrientation(_ orientation: DockOrientation) async {
+        guard licenseManager.isUnlocked else { return }
+        licenseManager.isFeatureOperationInProgress = true
+        defer { licenseManager.isFeatureOperationInProgress = false }
+        guard !isPlacingDock else { return }
+        guard AccessibilityPermission.isGranted() else {
+            showAccessibilityGuide()
+            return
+        }
+        guard DockController.shared.readOrientation() != orientation else { rebuildMenu(); return }
+        let result: DockController.ChangeResult
+        do {
+            isPlacingDock = true
+            DockGuardian.shared.pause()
+            defer {
+                isPlacingDock = false
+                DockGuardian.shared.refresh()
+            }
+            result = DockController.shared.changeOrientation(to: orientation)
+        }
+        switch result {
+        case .applied:
+            if orientation == .bottom {
+                if await restorePinnedDock() {
+                    panelModel.flash("Dock position is now Bottom.")
+                }
+            } else {
+                panelModel.flash("Dock position is now \(orientation.displayName). macOS controls which display uses this edge.")
+            }
+        case .notSaved:
+            panelModel.flash("macOS could not save \(orientation.displayName). Try again or change Dock position in System Settings.", isError: true)
+        case .savedWithoutRestart:
+            panelModel.flash("\(orientation.displayName) is saved, but the Dock did not restart. Apply it in System Settings.", isError: true)
+        }
+        rebuildMenu()
+    }
+
     private func applyAutohide(_ enabled: Bool) async {
+        guard licenseManager.isUnlocked else { return }
+        licenseManager.isFeatureOperationInProgress = true
+        defer { licenseManager.isFeatureOperationInProgress = false }
         guard !isPlacingDock else { return }
         DockGuardian.shared.pause()
         let result = DockController.shared.changeAutohide(to: enabled)
@@ -389,6 +536,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func activateProfile(id profileID: UUID) async {
+        guard licenseManager.isUnlocked else { return }
+        licenseManager.isFeatureOperationInProgress = true
+        defer { licenseManager.isFeatureOperationInProgress = false }
         guard !isPlacingDock else { return }
         guard let profile = ProfileManager.shared.profiles.first(where: { $0.id == profileID }) else { return }
         guard let targetScreen = NSScreen.screen(matching: profile.displayID) else {
@@ -419,6 +569,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
 
     private func saveProfile(named name: String) {
+        guard licenseManager.isUnlocked else { return }
         guard ProfileManager.shared.saveCurrentAsProfile(name: name) != nil else {
             panelModel.flash("Lock the Dock to a display before saving a profile.", isError: true)
             return
@@ -428,6 +579,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func deleteProfile(id: UUID) {
+        guard licenseManager.isUnlocked else { return }
         guard let profile = ProfileManager.shared.profiles.first(where: { $0.id == id }) else { return }
         ProfileManager.shared.deleteProfile(id: id)
         panelModel.flash("Deleted \(profile.name).")
@@ -435,7 +587,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func toggleLaunchAtLogin() {
-        LaunchAtLoginManager.shared.toggle()
+        guard licenseManager.isUnlocked else { return }
+        switch LaunchAtLoginManager.shared.toggle() {
+        case .enabled:
+            panelModel.flash("Launch at Login is enabled.")
+        case .disabled:
+            panelModel.flash("Launch at Login is disabled.")
+        case .requiresApproval:
+            panelModel.flash("Approve Dlock in System Settings → General → Login Items. Open Login Items Settings from Dlock’s Settings menu.", isError: true)
+        case .unavailable:
+            panelModel.flash("macOS could not find Dlock’s login item. Keep Dlock in Applications and try again.", isError: true)
+        case .failed(let message):
+            panelModel.flash("Could not change Launch at Login: \(message)", isError: true)
+        }
         rebuildMenu()
     }
 
@@ -467,7 +631,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func checkForUpdates() {
-        UpdateChecker.shared.checkAndNotify()
+        showControlsWindow()
+        UpdateChecker.shared.check()
+    }
+
+    private func resizeControlsToFit() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let content = self.controlsWindow?.contentView else { return }
+            content.layoutSubtreeIfNeeded()
+            self.controlsWindow.setContentSize(NSSize(width: DlockPanelView.width, height: content.fittingSize.height))
+        }
     }
 
     @objc private func openAccessibilitySettings() {
@@ -475,18 +648,74 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         showAccessibilityGuide()
     }
 
-    @objc private func showAbout() {
-        // Use NSApp's About panel which automatically uses the app icon
+    private func showLicense() {
+        licenseManager.load()
+        if licenseWindow == nil {
+            let controller = NSHostingController(rootView: LicenseView(manager: licenseManager))
+            controller.sizingOptions = [.preferredContentSize]
+            let window = NSWindow(contentViewController: controller)
+            window.title = "Dlock License — Testing"
+            window.styleMask = [.titled, .closable]
+            window.isReleasedWhenClosed = false
+            window.level = NSWindow.Level(rawValue: controlsWindow.level.rawValue + 1)
+            window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+            window.center()
+            licenseWindow = window
+        }
         NSApp.activate(ignoringOtherApps: true)
+        licenseWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func showAbout() {
+        NSApp.activate(ignoringOtherApps: true)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.lineSpacing = 2
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: paragraph
+        ]
+        let credits = NSMutableAttributedString(string: "Your Dock. Locked to your preferred screen.\n", attributes: attributes)
+        credits.addAttribute(.font, value: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold), range: NSRange(location: 0, length: credits.length))
+        credits.append(NSAttributedString(
+            string: "\nCreated by Kevin Mukoond • 🇲🇺\n\n",
+            attributes: attributes
+        ))
+        let links = [
+            ("Website", "https://kevin.mu"),
+            ("𝕏", "https://x.com/mkev07"),
+            ("Report an Issue", "mailto:reachme@kevin.mu")
+        ]
+        for (index, link) in links.enumerated() {
+            if index > 0 { credits.append(NSAttributedString(string: " • ", attributes: attributes)) }
+            var linkAttributes = attributes
+            linkAttributes[.link] = URL(string: link.1)!
+            credits.append(NSAttributedString(string: link.0, attributes: linkAttributes))
+        }
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "Dlock",
-            .applicationVersion: "1.0.0",
-            .version: "1.0.0",
-            .credits: NSAttributedString(
-                string: "A macOS menu bar app that prevents the Dock from following the pointer away from your preferred screen.\n\nBuilt with Swift and AppKit.",
-                attributes: [.font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)]
-            )
+            .applicationVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "",
+            .version: "",
+            NSApplication.AboutPanelOptionKey(rawValue: "Copyright"): "",
+            .credits: credits
         ])
+        for window in NSApp.windows {
+            if let content = window.contentView, configureAboutTooltip(in: content) {
+                window.level = NSWindow.Level(rawValue: controlsWindow.level.rawValue + 1)
+                window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+                window.makeKeyAndOrderFront(nil)
+            }
+        }
+    }
+
+    private func configureAboutTooltip(in view: NSView) -> Bool {
+        if let textView = view as? NSTextView,
+           textView.string.contains("Created by Kevin Mukoond • 🇲🇺") {
+            AboutFlagTooltip.install(in: textView)
+            return true
+        }
+        return view.subviews.contains { configureAboutTooltip(in: $0) }
     }
 
     @objc private func quitApp() {
@@ -501,6 +730,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func placeDock(on screen: NSScreen) async -> Bool {
+        guard licenseManager.isUnlocked else { return false }
+        licenseManager.isFeatureOperationInProgress = true
+        defer { licenseManager.isFeatureOperationInProgress = false }
         guard !isPlacingDock else { return false }
         if DockGuardian.shared.currentDockScreen()?.displayID == screen.displayID { return true }
         // Both apps install input guards around Dock edges. A competing guard

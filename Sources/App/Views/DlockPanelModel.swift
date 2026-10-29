@@ -31,7 +31,20 @@ final class DlockPanelModel: ObservableObject {
         case attention
     }
 
+    /// A configured pin alone does not prove that the Dock is locked there.
+    static func resolveLockStatus(hasAccess: Bool, pinnedDisplayID: String?,
+                                  dockDisplayID: String?, connectedDisplayIDs: [String],
+                                  guardActive: Bool) -> LockStatus {
+        guard hasAccess else { return .needsAccess }
+        guard let pinnedDisplayID else { return .unlocked }
+        guard connectedDisplayIDs.contains(pinnedDisplayID) else { return .attention }
+        guard connectedDisplayIDs.count > 1 else { return .singleDisplay }
+        guard guardActive, dockDisplayID == pinnedDisplayID else { return .attention }
+        return .locked
+    }
+
     struct State: Equatable {
+        var isLicensed = false
         var displays: [Display] = []
         var pinnedDisplayID: String?
         /// The display the Dock is currently on, when Dlock can read it.
@@ -48,7 +61,8 @@ final class DlockPanelModel: ObservableObject {
         var pinnedDisplayName: String? {
             displays.first { $0.id == pinnedDisplayID }?.name
         }
-        var isLocked: Bool { pinnedDisplayName != nil }
+        var canUseDockFeatures: Bool { isLicensed && isAccessibilityGranted }
+        var isLocked: Bool { isLicensed && pinnedDisplayName != nil }
     }
 
     struct Feedback: Identifiable, Equatable {
@@ -61,7 +75,9 @@ final class DlockPanelModel: ObservableObject {
         case selectDisplay(String)
         case setLocked(Bool)
         case setAutohide(Bool)
+        case setOrientation(DockOrientation)
         case grantAccess
+        case showLicense
         case showProfilesMenu
         case showSettingsMenu
         case quit

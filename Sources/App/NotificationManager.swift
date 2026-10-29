@@ -24,8 +24,15 @@ class NotificationManager {
         send(title: "Pinned Screen Disconnected", body: "\"\(name)\" is no longer connected. Dlock kept the preference for when it returns.")
     }
 
-    func screenReconnected(name: String) {
-        send(title: "Pinned Screen Reconnected", body: "Move the Dock to \"\(name)\" once, then Dlock will keep it there.")
+    func screenReconnected(name: String, restored: Bool) {
+        send(title: "Pinned Screen Reconnected", body: Self.reconnectionMessage(name: name, restored: restored))
+    }
+
+    static func reconnectionMessage(name: String, restored: Bool) -> String {
+        if restored {
+            return "The Dock is back on \"\(name)\"."
+        }
+        return "\"\(name)\" is connected, but Dlock could not confirm the Dock returned. Open Dlock and select this display to retry."
     }
 
     func profileActivated(name: String) {

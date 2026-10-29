@@ -4,36 +4,48 @@ import ServiceManagement
 class LaunchAtLoginManager {
 
     static let shared = LaunchAtLoginManager()
-    private let key = "launchAtLogin"
 
-    private init() {}
-
-    var isEnabled: Bool {
-        get { UserDefaults.standard.bool(forKey: key) }
-        set { UserDefaults.standard.set(newValue, forKey: key) }
+    enum ChangeResult: Equatable {
+        case enabled
+        case disabled
+        case requiresApproval
+        case unavailable
+        case failed(String)
     }
 
-    func toggle() {
-        isEnabled = !isEnabled
-        apply()
+    private let readStatus: () -> SMAppService.Status
+    private let register: () throws -> Void
+    private let unregister: () throws -> Void
+
+    init(readStatus: @escaping () -> SMAppService.Status = { SMAppService.mainApp.status },
+         register: @escaping () throws -> Void = { try SMAppService.mainApp.register() },
+         unregister: @escaping () throws -> Void = { try SMAppService.mainApp.unregister() }) {
+        self.readStatus = readStatus
+        self.register = register
+        self.unregister = unregister
     }
 
-    func apply() {
-        if #available(macOS 13.0, *) {
-            let service = SMAppService.mainApp
-            if isEnabled {
-                do {
-                    try service.register()
-                } catch {
-                    print("DLock: failed to register for login item: \(error)")
-                }
+    var status: SMAppService.Status { readStatus() }
+    var isEnabled: Bool { status == .enabled }
+    var requiresApproval: Bool { status == .requiresApproval }
+
+    func toggle() -> ChangeResult {
+        let currentStatus = status
+        do {
+            if currentStatus == .enabled || currentStatus == .requiresApproval {
+                try unregister()
             } else {
-                do {
-                    try service.unregister()
-                } catch {
-                    print("DLock: failed to unregister login item: \(error)")
-                }
+                try register()
             }
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+        switch status {
+        case .enabled: return .enabled
+        case .notRegistered: return .disabled
+        case .requiresApproval: return .requiresApproval
+        case .notFound: return .unavailable
+        @unknown default: return .unavailable
         }
     }
 }

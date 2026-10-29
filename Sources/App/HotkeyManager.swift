@@ -8,6 +8,7 @@ class HotkeyManager {
 
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var eventRunLoop: CFRunLoop?
     private var isEnabled = false
 
     var onHotkeyPressed: (() -> Void)?
@@ -24,10 +25,10 @@ class HotkeyManager {
             place: .headInsertEventTap,
             options: .defaultTap,
             eventsOfInterest: eventMask,
-            callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
-                guard let refcon = refcon else { return Unmanaged.passRetained(event) }
+            callback: { (_, type, event, refcon) -> Unmanaged<CGEvent>? in
+                guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
                 let manager = Unmanaged<HotkeyManager>.fromOpaque(refcon).takeUnretainedValue()
-                return manager.handleEvent(proxy: proxy, type: type, event: event)
+                return manager.handleEvent(type: type, event: event)
             },
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
@@ -35,9 +36,14 @@ class HotkeyManager {
             return
         }
 
+        guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
+            CFMachPortInvalidate(tap)
+            return
+        }
         eventTap = tap
-        runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
+        runLoopSource = source
+        eventRunLoop = CFRunLoopGetCurrent()
+        CFRunLoopAddSource(eventRunLoop, source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
         isEnabled = true
     }
@@ -45,30 +51,40 @@ class HotkeyManager {
     func unregister() {
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
+            if let source = runLoopSource, let runLoop = eventRunLoop {
+                CFRunLoopRemoveSource(runLoop, source, .commonModes)
+            }
+            CFMachPortInvalidate(tap)
             eventTap = nil
             runLoopSource = nil
+            eventRunLoop = nil
             isEnabled = false
         }
     }
 
-    private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        if type == .keyDown {
-            let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-            let flags = event.flags
-
-            let controlPressed = flags.contains(.maskControl)
-            let altPressed = flags.contains(.maskAlternate)
-            _ = flags.contains(.maskCommand)
-            // Cmd+Ctrl+Alt+D
-            if controlPressed && altPressed && keyCode == 2 {
+    func handleEvent(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if isEnabled, let tap = eventTap, CFMachPortIsValid(tap) {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+            return Unmanaged.passUnretained(event)
+        }
+        if type == .keyDown && Self.matchesShortcut(event) {
+            if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
                 DispatchQueue.main.async { [weak self] in
                     self?.onHotkeyPressed?()
                 }
-                return nil // consume the event
             }
+            return nil
         }
-        return Unmanaged.passRetained(event)
+        return Unmanaged.passUnretained(event)
+    }
+
+    static func matchesShortcut(_ event: CGEvent) -> Bool {
+        let modifiers: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskShift]
+        let required: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate]
+        return event.getIntegerValueField(.keyboardEventKeycode) == Int64(kVK_ANSI_D)
+            && event.flags.intersection(modifiers) == required
     }
 
     deinit {
