@@ -24,19 +24,22 @@ struct DlockPanelView: View {
                     .padding(.bottom, 4)
             }
 
-            Group {
-                if !state.displays.isEmpty {
-                    DisplayMap(state: state) { model.send(.selectDisplay($0)) }
-                        .animation(.easeInOut(duration: 0.2), value: state)
-                        .padding(.top, 4)
-                        .padding(.bottom, 10)
-                }
+            if !state.displays.isEmpty {
+                DisplayMap(state: state) { model.send(.selectDisplay($0)) }
+                    .animation(.easeInOut(duration: 0.2), value: state)
+                    .padding(.top, 4)
+                    .padding(.bottom, 10)
+                    .disabled(!state.canUseDockFeatures)
+                    .opacity(state.canUseDockFeatures ? 1 : 0.45)
+                DisplayLayoutHelp(model: model) { model.send(.selectDisplay($0)) }
+            }
 
-                PanelDivider()
+            Group {
                 SectionHeader(title: "Displays")
-                ForEach(state.displays) { display in
+                ForEach(Array(state.displays.enumerated()), id: \.element.id) { index, display in
                     DisplayRow(
                         display: display,
+                        number: index + 1,
                         isPinned: display.id == state.pinnedDisplayID,
                         isVerified: state.status == .locked,
                         hasDock: display.id == state.dockDisplayID
@@ -56,6 +59,22 @@ struct DlockPanelView: View {
             .disabled(!state.canUseDockFeatures)
             AutohideRow(isOn: state.autohideEnabled) { model.send(.setAutohide($0)) }
                 .disabled(!state.canUseDockFeatures)
+            HStack {
+                Text("Lock Dock size")
+                    .font(.system(size: 13))
+                Spacer()
+                Toggle("Lock Dock size", isOn: Binding(
+                    get: { state.sizeLockEnabled ?? false },
+                    set: { model.send(.setSizeLock($0)) }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4)
+            .disabled(!state.canUseDockFeatures || state.sizeLockEnabled == nil)
+            .help("Prevent resizing with the Dock divider. Changing this restarts the Dock. The setting stays active after quitting Dlock; turn it off here to resize again.")
 
             PanelDivider()
             MenuRow(title: "Profiles", value: state.profiles.first(where: \.isActive)?.name, showsChevron: true) {
@@ -218,6 +237,7 @@ private struct AccessRow: View {
 
 private struct DisplayRow: View {
     let display: DlockPanelModel.Display
+    let number: Int
     let isPinned: Bool
     let isVerified: Bool
     let hasDock: Bool
@@ -234,7 +254,7 @@ private struct DisplayRow: View {
             HStack(spacing: 9) {
                 CircleGlyph(symbol: display.isBuiltIn ? "laptopcomputer" : "display", isSelected: isPinned)
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(display.name)
+                    Text("\(number). \(display.name)")
                         .font(.system(size: 13))
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -258,7 +278,7 @@ private struct DisplayRow: View {
         }
         .buttonStyle(.plain)
         .help(isPinned ? (isVerified ? "The Dock is locked to \(display.name)" : "Selected for Dock Lock: \(display.name)") : "Lock the Dock to \(display.name)")
-        .accessibilityLabel(display.name + (detail.map { ", \($0)" } ?? ""))
+        .accessibilityLabel("Display \(number), \(display.name)" + (detail.map { ", \($0)" } ?? ""))
         .accessibilityAddTraits(isPinned ? .isSelected : [])
     }
 }
@@ -399,7 +419,7 @@ private struct DisplayMap: View {
     let state: DlockPanelModel.State
     let onSelect: (String) -> Void
 
-    private let maxSize = CGSize(width: 230, height: 72)
+    private let maxSize = CGSize(width: 250, height: 110)
     private let gap: CGFloat = 4
 
     var body: some View {
@@ -408,7 +428,7 @@ private struct DisplayMap: View {
         let dockID = state.dockDisplayID
 
         ZStack(alignment: .topLeading) {
-            ForEach(state.displays) { display in
+            ForEach(Array(state.displays.enumerated()), id: \.element.id) { index, display in
                 let rect = CGRect(
                     x: (display.frame.minX - bounds.minX) * scale,
                     y: (bounds.maxY - display.frame.maxY) * scale,
@@ -416,34 +436,27 @@ private struct DisplayMap: View {
                     height: display.frame.height * scale
                 ).insetBy(dx: gap / 2, dy: gap / 2)
 
-                VStack(spacing: 4) {
-                    DisplayTile(
-                        display: display,
-                        isPinned: display.id == state.pinnedDisplayID,
-                        showsDock: display.id == dockID,
-                        orientation: state.orientation
-                    ) {
-                        onSelect(display.id)
-                    }
-                    .frame(width: rect.width, height: rect.height)
-                    Text(display.isBuiltIn ? "Built-in" : display.name)
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .help(display.name)
+                DisplayTile(
+                    display: display,
+                    number: index + 1,
+                    isPinned: display.id == state.pinnedDisplayID,
+                    showsDock: display.id == dockID,
+                    orientation: state.orientation
+                ) {
+                    onSelect(display.id)
                 }
-                .frame(width: rect.width)
+                .frame(width: rect.width, height: rect.height)
                 .offset(x: rect.minX, y: rect.minY)
             }
         }
-        .frame(width: bounds.width * scale, height: bounds.height * scale + 18, alignment: .topLeading)
+        .frame(width: bounds.width * scale, height: bounds.height * scale, alignment: .topLeading)
         .frame(maxWidth: .infinity)
     }
 }
 
 private struct DisplayTile: View {
     let display: DlockPanelModel.Display
+    let number: Int
     let isPinned: Bool
     let showsDock: Bool
     let orientation: DockOrientation
@@ -459,6 +472,12 @@ private struct DisplayTile: View {
         Button(action: action) {
             ZStack {
                 shape.fill(isPinned ? Color.accentColor.opacity(0.18) : Color.primary.opacity(isHovering ? 0.11 : 0.06))
+                Text("\(number)")
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .foregroundStyle(isPinned ? Color.accentColor : Color.secondary)
+                    .minimumScaleFactor(0.6)
+                    .lineLimit(1)
+                    .padding(4)
                 if showsDock {
                     DockBar(orientation: orientation, color: isPinned ? .accentColor : Color.secondary)
                 }
@@ -473,8 +492,8 @@ private struct DisplayTile: View {
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.12)) { isHovering = hovering }
         }
-        .help(display.name)
-        .accessibilityLabel(display.name)
+        .help("Display \(number): \(display.name)")
+        .accessibilityLabel("Display \(number), \(display.name)")
         .accessibilityAddTraits(isPinned ? .isSelected : [])
     }
 }

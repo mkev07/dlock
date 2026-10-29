@@ -29,6 +29,44 @@ For each connected display, move the pointer to the middle of each exposed guard
 
 Repeat the key edge checks with Option held; Dlock intentionally bypasses its guard while Option is held.
 
+## Window and icon acceptance
+
+- Launch Dlock from Applications or Spotlight: the detached controls and Dock
+  icon appear. Opening Dlock again brings the existing controls forward.
+- Close the controls with the close button: the Dock icon disappears, the app
+  keeps running, and Dock protection continues. Repeat via the menu bar icon.
+- Disable Settings → Show Menu Bar Icon: the menu bar icon disappears while
+  the open controls and Dock icon remain. Close controls, then reopen Dlock
+  from the launcher; controls and Dock icon return without the menu bar icon.
+- Quit and launch with the menu bar icon hidden: controls open and the setting
+  stays hidden. Re-enable the menu bar icon through Settings.
+- Launch at Login should keep the controls and Dock icon hidden for a valid
+  saved activation. This still requires a real logout/login acceptance check.
+
+## Display layout guidance acceptance
+
+- With aligned stacked displays, selecting the blocked upper display opens its
+  layout explanation without moving the real pointer.
+- The popover arrow lines up with the layout-tip chevron.
+- Current arrangement and Suggested layout tabs animate only the diagram.
+  The edge-colour key is centred inside the illustration box below the screens,
+  with no overlap in either tab. Screen numbers
+  match the main Displays list without repeating its names in the popover.
+  The selected tab uses a glass pill and the popover hides background content.
+  The indicated exposed edge must match the suggested left/right offset.
+- With Reduce Motion enabled, the diagram changes without sliding screens.
+- Open Displays opens the settings pane without changing the arrangement.
+  After a manual offset, retry selects the intended display and verifies it.
+- Already offset and wider upper displays do not receive a false blocked-edge
+  warning. A third display must not overlap a suggested position.
+- Disconnecting a display or changing arrangement while help is open must not
+  leave stale controls or an incorrectly sized panel.
+- With Separate Spaces off, the app offers the Desktop & Dock settings shortcut
+  without claiming it has changed or worked around the setting.
+
+These checks are pending live acceptance; automated layout checks cover the
+geometry and never change actual screen arrangements.
+
 ## Release gate
 
 - No scenario reports confirmed protection when no edge zones are guarded or the event tap is unavailable.

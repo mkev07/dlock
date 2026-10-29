@@ -16,6 +16,7 @@ final class DockController {
     private let domain = "com.apple.dock" as CFString
     private let orientationKey = "orientation" as CFString
     private let autohideKey = "autohide" as CFString
+    private let sizeLockKey = "size-immutable" as CFString
 
     private init() {}
 
@@ -123,6 +124,23 @@ final class DockController {
         readAutohide() ?? false
     }
 
+    func readSizeLock() -> Bool? {
+        guard let value = readValue(sizeLockKey) else { return false }
+        return (value as? NSNumber)?.boolValue
+    }
+
+    func changeSizeLock(to enabled: Bool) -> ChangeResult {
+        let previous = readValue(sizeLockKey)
+        guard let current = readSizeLock() else { return .notSaved }
+        if current == enabled { return .applied }
+        guard writeValue(sizeLockKey, enabled ? kCFBooleanTrue : kCFBooleanFalse),
+              readSizeLock() == enabled else {
+            writeValue(sizeLockKey, previous)
+            return .notSaved
+        }
+        return restartDock() ? .applied : .savedWithoutRestart
+    }
+
     @discardableResult
     func applySettings(profile: DLockProfile) -> Bool {
         guard setOrientation(profile.orientation), setAutohide(profile.autohide) else { return false }
@@ -206,35 +224,7 @@ final class DockController {
     /// Choose the longest exposed edge segment, avoiding seams between displays.
     static func placementPoint(in bounds: CGRect, orientation: DockOrientation,
                                displays: [CGRect]) -> CGPoint? {
-        let vertical = orientation != .bottom
-        var segments = [(vertical ? bounds.minY : bounds.minX,
-                         vertical ? bounds.maxY : bounds.maxX)]
-        for other in displays where other != bounds {
-            let adjacent: Bool
-            switch orientation {
-            case .left: adjacent = abs(other.maxX - bounds.minX) <= 2
-            case .right: adjacent = abs(other.minX - bounds.maxX) <= 2
-            case .bottom: adjacent = abs(other.minY - bounds.maxY) <= 2
-            }
-            guard adjacent else { continue }
-            let low = vertical ? other.minY : other.minX
-            let high = vertical ? other.maxY : other.maxX
-            segments = segments.flatMap { start, end -> [(CGFloat, CGFloat)] in
-                guard low < end && high > start else { return [(start, end)] }
-                var remaining: [(CGFloat, CGFloat)] = []
-                if low > start { remaining.append((start, min(low, end))) }
-                if high < end { remaining.append((max(high, start), end)) }
-                return remaining
-            }
-        }
-        guard let segment = segments.filter({ $0.1 - $0.0 > 2 })
-            .max(by: { $0.1 - $0.0 < $1.1 - $1.0 }) else { return nil }
-        let middle = (segment.0 + segment.1) / 2
-        switch orientation {
-        case .left: return CGPoint(x: bounds.minX, y: middle)
-        case .right: return CGPoint(x: bounds.maxX - 1, y: middle)
-        case .bottom: return CGPoint(x: middle, y: bounds.maxY - 1)
-        }
+        DockLayoutGeometry.placementPoint(in: bounds, orientation: orientation, displays: displays)
     }
 
     // MARK: - Preferences

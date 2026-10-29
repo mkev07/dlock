@@ -28,11 +28,12 @@ A lightweight macOS menu bar app that prevents the Dock from following your poin
 - **Reconnect Memory** — Keeps the preferred display UUID when a screen disconnects and resumes protection when it returns
 - **Detached Controls** — A movable window with an animated display map and compact display labels
 - **Auto-hide** — Toggle Dock auto-hide from the controls window
+- **Lock Dock Size** — Prevent resizing with the Dock divider. Changing the toggle restarts the Dock and attempts to restore its preferred display. The macOS setting persists after quitting Dlock; turn it off to resize again. Divider behavior still requires live validation.
 - **Profiles** — Save and switch between named presets (screen + auto-hide)
 - **Notifications** — Get notified when a screen disconnects or a profile is activated
 - **Reset to Main Display** — Moves the Dock to the primary display, then clears the pin
 - **Menu Bar Icon** — Choose between the default icon or the Dlock app logo
-- **Show in Dock** — Optionally show Dlock in the Dock alongside the menu bar icon
+- **Window and App Icons** — Show Dlock in the Dock while its controls are open; closing the controls hides the Dock icon while protection continues. Settings can hide the menu bar icon. Open Dlock from Applications, Spotlight, or the app launcher to reopen its controls.
 - **Keyboard Shortcut** — `⌃⌥D` opens the Dlock controls
 - **Launch at Login** — Start Dlock automatically on login
 - **Inline Update Status** — Checks GitHub on launch and shows checking, current, available, unavailable, and failed states inside the controls. Retry checks or open a verified GitHub release page; downloads and installation remain manual.
@@ -104,5 +105,11 @@ See [release validation](docs/RELEASE_VALIDATION.md) for the acceptance checklis
 ## Validation
 
 Run the offline checks using [Tests/README.md](Tests/README.md). They cover Dock geometry and exposed-edge placement points; they do not exercise the live pointer guard or prove release readiness.
+
+See the [Dlock FAQ](docs/FAQ.md) for stacked-display setup and troubleshooting,
+and [product opportunities](docs/PRODUCT-OPPORTUNITIES.md) for the prioritized
+feature investigation. The display map offers a layout tip when another screen
+covers a bottom Dock edge. Its suggested arrangement is an illustration; use
+System Settings to rearrange displays, then retry in Dlock.
 
 See [the placement investigation](docs/DOCK-PLACEMENT-INVESTIGATION.md) for implementation evidence and known side-placement limits.

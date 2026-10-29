@@ -53,6 +53,7 @@ Dock settings. Run from the repository root:
 ```sh
 xcrun swiftc -parse-as-library \
   Sources/App/DockController.swift \
+  Sources/App/DockLayoutGeometry.swift \
   Sources/App/DockGuardian.swift \
   Sources/App/ScreenManager.swift \
   Sources/App/ProfileManager.swift \
@@ -65,6 +66,20 @@ xcrun swiftc -parse-as-library \
 ```
 
 Connected-display validation is documented in `docs/RELEASE_VALIDATION.md`.
+
+## Display layout guidance
+
+```sh
+xcrun swiftc -parse-as-library Sources/App/DockLayoutGeometry.swift \
+  Sources/App/DockOrientation.swift Tests/DisplayLayoutChecks.swift \
+  -o /tmp/dlock-display-layout-checks
+/tmp/dlock-display-layout-checks
+```
+
+These checks cover blocked and exposed bottom edges, multiple adjacent displays,
+coordinate conversion, offset suggestions, and avoiding overlaps. They never
+rearrange real displays or move the pointer. The in-app animation is an
+illustration; placement after a user rearranges screens still needs live testing.
 
 ## Keyboard shortcut checks
 

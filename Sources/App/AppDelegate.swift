@@ -3,7 +3,7 @@ import SwiftUI
 import ServiceManagement
 
 @MainActor
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private var statusItem: NSStatusItem!
     private var licenseWindow: NSWindow?
@@ -16,12 +16,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var licenseRefreshTimer: Timer?
     private let accessGuide = AccessGuideController()
 
-    private static let showInDockKey = "showInDock"
+    private static let showMenuBarIconKey = "showMenuBarIcon"
     private static let useLogoMenuBarIconKey = "useLogoMenuBarIcon"
 
-    private var showInDock: Bool {
-        get { UserDefaults.standard.bool(forKey: Self.showInDockKey) }
-        set { UserDefaults.standard.set(newValue, forKey: Self.showInDockKey) }
+    private var showMenuBarIcon: Bool {
+        get { UserDefaults.standard.object(forKey: Self.showMenuBarIconKey) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: Self.showMenuBarIconKey) }
     }
 
     private var useLogoMenuBarIcon: Bool {
@@ -35,8 +35,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let launchEvent = NSAppleEventManager.shared().currentAppleEvent
+        let launchedAtLogin = launchEvent?.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
+            || launchEvent?.paramDescriptor(forKeyword: keyAELaunchedAsLogInItem)?.booleanValue == true
         setupEditingMenu()
-        applyDockVisibility()
         setupStatusItem()
         licenseManager.onAccessChange = { [weak self] unlocked in self?.applyLicenseAccess(unlocked) }
         licenseManager.load()
@@ -54,6 +56,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSApplication.didBecomeActiveNotification, object: nil)
         rebuildMenu()
         UpdateChecker.shared.checkSilently()
+        if !launchedAtLogin { showControlsWindow() }
         if licenseManager.hasActivation {
             Task {
                 await licenseManager.refreshIfNeeded()
@@ -147,7 +150,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func applyDockVisibility() {
-        NSApp.setActivationPolicy(showInDock ? .regular : .accessory)
+        let policy: NSApplication.ActivationPolicy = controlsWindow.isVisible ? .regular : .accessory
+        if NSApp.activationPolicy() != policy {
+            NSApp.setActivationPolicy(policy)
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showControlsWindow()
+        return false
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard sender === controlsWindow else { return true }
+        hideControlsWindow()
+        return false
+    }
+
+    private func hideControlsWindow() {
+        controlsWindow.orderOut(nil)
+        applyDockVisibility()
     }
 
     private func applyMenuBarIcon() {
@@ -166,6 +192,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem.isVisible = showMenuBarIcon
         applyMenuBarIcon()
 
         let hostingController = NSHostingController(rootView: DlockPanelView(model: panelModel))
@@ -177,11 +204,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.titleVisibility = .hidden
         window.isMovableByWindowBackground = true
         window.isReleasedWhenClosed = false
-        window.level = .floating
+        window.level = .normal
         window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         window.setContentSize(NSSize(width: DlockPanelView.width, height: hostingController.view.fittingSize.height))
         window.center()
         controlsWindow = window
+        window.delegate = self
         // Poll preferences even with the controls closed. During placement,
         // the guardian must remain paused; its final refresh uses the newest
         // orientation. AX location checks only run while controls are visible.
@@ -208,7 +236,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleControlsWindow() {
         if controlsWindow.isVisible {
-            controlsWindow.orderOut(nil)
+            hideControlsWindow()
         } else {
             showControlsWindow()
         }
@@ -216,13 +244,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showControlsWindow() {
         rebuildMenu()
+        controlsWindow.makeKeyAndOrderFront(nil)
+        applyDockVisibility()
         NSApp.activate(ignoringOtherApps: true)
         controlsWindow.makeKeyAndOrderFront(nil)
     }
 
     private func handle(_ action: DlockPanelModel.Action) {
         switch action {
-        case .selectDisplay, .setLocked, .setAutohide, .setOrientation, .grantAccess, .showProfilesMenu:
+        case .selectDisplay, .setLocked, .setAutohide, .setSizeLock, .setOrientation, .grantAccess, .showProfilesMenu:
             guard licenseManager.isUnlocked else { showLicense(); return }
         default: break
         }
@@ -231,6 +261,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         case .selectDisplay(let displayID): Task { await pinToDisplay(displayID) }
         case .setLocked(let locked): Task { await setLocked(locked) }
         case .setAutohide(let enabled): Task { await applyAutohide(enabled) }
+        case .setSizeLock(let enabled): Task { await applySizeLock(enabled) }
         case .setOrientation(let orientation): Task { await applyOrientation(orientation) }
         case .grantAccess: openAccessibilitySettings()
         case .showProfilesMenu: showProfilesMenu()
@@ -289,8 +320,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 SMAppService.openSystemSettingsLoginItems()
             })
         }
-        menu.addItem(ActionMenuItem("Show Dlock in Dock", isChecked: showInDock) { [weak self] in
-            self?.toggleShowInDock()
+        menu.addItem(ActionMenuItem("Show Menu Bar Icon", isChecked: showMenuBarIcon) { [weak self] in
+            self?.toggleMenuBarIcon()
         })
         let icon = NSMenuItem(title: "Menu Bar Icon", action: nil, keyEquivalent: "")
         let iconMenu = NSMenu()
@@ -303,6 +334,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         icon.submenu = iconMenu
         menu.addItem(icon)
         menu.addItem(.separator())
+        menu.addItem(ActionMenuItem("Open Display Settings…") {
+            guard let url = URL(string: "x-apple.systempreferences:com.apple.Displays-Settings.extension") else { return }
+            NSWorkspace.shared.open(url)
+        })
         menu.addItem(ActionMenuItem("Move Dock to Main Display", isEnabled: licenseManager.isUnlocked && AccessibilityPermission.isGranted()) { [weak self] in
             Task { await self?.resetToMainDisplay() }
         })
@@ -411,15 +446,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             dockDisplayID: dockScreen?.displayID,
             orientation: orientation,
             autohideEnabled: autohide,
+            sizeLockEnabled: DockController.shared.readSizeLock(),
+            displaysHaveSeparateSpaces: NSScreen.screensHaveSeparateSpaces,
             status: status,
             statusTitle: title,
             statusDetail: detail,
             profiles: profiles
         )
         if panelModel.state != nextState {
-            let orientationChanged = panelModel.state.orientation != nextState.orientation
+            let layoutChanged = panelModel.state.orientation != nextState.orientation
+                || panelModel.state.displays != nextState.displays
+                || panelModel.state.displaysHaveSeparateSpaces != nextState.displaysHaveSeparateSpaces
             panelModel.state = nextState
-            if orientationChanged {
+            if layoutChanged {
                 DispatchQueue.main.async { [weak self] in
                     guard let self, let content = self.controlsWindow.contentView else { return }
                     content.layoutSubtreeIfNeeded()
@@ -510,6 +549,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             panelModel.flash("\(orientation.displayName) is saved, but the Dock did not restart. Apply it in System Settings.", isError: true)
         }
         rebuildMenu()
+    }
+
+    private func applySizeLock(_ enabled: Bool) async {
+        guard licenseManager.isUnlocked, !isPlacingDock else { return }
+        guard AccessibilityPermission.isGranted() else { showAccessibilityGuide(); return }
+        licenseManager.isFeatureOperationInProgress = true
+        DockGuardian.shared.pause()
+        defer {
+            licenseManager.isFeatureOperationInProgress = false
+            DockGuardian.shared.refresh()
+            rebuildMenu()
+        }
+        isPlacingDock = true
+        let result = DockController.shared.changeSizeLock(to: enabled)
+        isPlacingDock = false
+        switch result {
+        case .applied:
+            guard await restorePinnedDock() else { return }
+            panelModel.flash(enabled ? "Dock size is locked." : "Dock size is unlocked.")
+        case .notSaved:
+            panelModel.flash("macOS could not save the Dock size lock. Try again.", isError: true)
+        case .savedWithoutRestart:
+            panelModel.flash("Size lock is saved, but the Dock did not restart. The change is not confirmed yet.", isError: true)
+        }
     }
 
     private func applyAutohide(_ enabled: Bool) async {
@@ -603,10 +666,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
     }
 
-    @objc private func toggleShowInDock() {
-        showInDock = !showInDock
-        applyDockVisibility()
-        rebuildMenu()
+    @objc private func toggleMenuBarIcon() {
+        showMenuBarIcon.toggle()
+        statusItem.isVisible = showMenuBarIcon
     }
 
     @objc private func selectDefaultMenuBarIcon() {
@@ -744,6 +806,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         guard AccessibilityPermission.isGranted() else {
             showAccessibilityGuide()
+            return false
+        }
+        if DockController.shared.getOrientation() == .bottom,
+           let displayID = screen.directDisplayID,
+           DockLayoutGeometry.placementPoint(in: CGDisplayBounds(displayID), orientation: .bottom,
+               displays: NSScreen.screens.compactMap { $0.directDisplayID.map(CGDisplayBounds) }) == nil {
+            panelModel.layoutHelpDisplayID = screen.displayID
+            panelModel.flash("The bottom edge of \(screen.localizedName) is covered. Open the layout tip above Displays to see how to arrange it.", isError: true)
             return false
         }
         isPlacingDock = true

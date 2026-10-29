@@ -52,6 +52,8 @@ final class DlockPanelModel: ObservableObject {
         var orientation: DockOrientation = .bottom
         /// nil when the current value could not be read.
         var autohideEnabled: Bool?
+        var sizeLockEnabled: Bool?
+        var displaysHaveSeparateSpaces = true
         var status: LockStatus = .unlocked
         var statusTitle = ""
         var statusDetail = ""
@@ -75,6 +77,7 @@ final class DlockPanelModel: ObservableObject {
         case selectDisplay(String)
         case setLocked(Bool)
         case setAutohide(Bool)
+        case setSizeLock(Bool)
         case setOrientation(DockOrientation)
         case grantAccess
         case showLicense
@@ -84,6 +87,7 @@ final class DlockPanelModel: ObservableObject {
     }
 
     @Published var state = State()
+    @Published var layoutHelpDisplayID: String?
     @Published private(set) var feedback: Feedback?
 
     var onAction: ((Action) -> Void)?
